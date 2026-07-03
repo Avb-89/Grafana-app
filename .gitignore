@@ -1,0 +1,31 @@
+.DS_Store
+
+# Xcode user/state files
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Build output
+build/
+DerivedData/
+*.app
+*.dSYM
+*.ipa
+
+# Swift Package Manager
+.swiftpm/
+.build/
+
+# Local workspace/runtime artifacts
+Workspace/
+Contents/Workspace/
+Contents/Monitoring/
+Contents/Scripts/logs/
+
+# Archives / downloaded components
+*.tar.gz
+*.zip
+*.7z
+
+# Logs
+*.log
