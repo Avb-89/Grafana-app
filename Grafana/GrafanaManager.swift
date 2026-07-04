@@ -439,7 +439,7 @@ final class GrafanaManager: ObservableObject {
 
         do {
             try prepareWorkspace()
-            let pendingFiles = try openMetricsFiles(in: historyPendingURL)
+            let pendingFiles = try pendingMetricsFiles(in: historyPendingURL)
             guard !pendingFiles.isEmpty else {
                 return
             }
@@ -474,7 +474,7 @@ final class GrafanaManager: ObservableObject {
 
             for file in filesToImport {
                 do {
-                    try importOpenMetricsFile(file)
+                    try importMetricsFile(file)
                     let fingerprint = try metricsFileFingerprint(file)
                     registry.insert(fingerprint)
                     try saveImportedMetricsRegistry(registry)
@@ -504,7 +504,7 @@ final class GrafanaManager: ObservableObject {
         }
     }
 
-    private func openMetricsFiles(in directory: URL) throws -> [URL] {
+    private func pendingMetricsFiles(in directory: URL) throws -> [URL] {
         guard fileManager.fileExists(atPath: directory.path) else {
             return []
         }
@@ -518,7 +518,8 @@ final class GrafanaManager: ObservableObject {
         return files
             .filter { file in
                 let values = try? file.resourceValues(forKeys: [.isRegularFileKey])
-                return values?.isRegularFile == true && file.pathExtension == "openmetrics"
+                let allowedExtensions = ["openmetrics", "prom"]
+                return values?.isRegularFile == true && allowedExtensions.contains(file.pathExtension.lowercased())
             }
             .sorted { left, right in
                 let leftDate = (try? left.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -528,7 +529,7 @@ final class GrafanaManager: ObservableObject {
 
     }
 
-    private func importOpenMetricsFile(_ file: URL) throws {
+    private func importMetricsFile(_ file: URL) throws {
         guard fileManager.fileExists(atPath: promtoolBinaryURL.path) else {
             throw NSError(
                 domain: "GrafanaManager",
