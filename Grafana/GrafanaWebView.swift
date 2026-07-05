@@ -12,7 +12,6 @@ struct GrafanaWebView: NSViewRepresentable {
     let url: URL
     let username: String
     let password: String
-    let onEscape: () -> Void
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -26,8 +25,7 @@ struct GrafanaWebView: NSViewRepresentable {
             )
         )
 
-        let webView = EscapeClosingWKWebView(frame: .zero, configuration: configuration)
-        webView.onEscape = onEscape
+        let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.customUserAgent = "Grafana macOS Workspace"
@@ -36,7 +34,6 @@ struct GrafanaWebView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        (webView as? EscapeClosingWKWebView)?.onEscape = onEscape
         if webView.url == nil {
             webView.load(URLRequest(url: url))
         }
@@ -139,28 +136,34 @@ struct GrafanaWindowView: View {
     private let grafanaURL = URL(string: "http://127.0.0.1:3000/login")!
 
     var body: some View {
-        GrafanaWebView(
-            url: grafanaURL,
-            username: username,
-            password: password,
-            onEscape: onClose
-        )
+        ZStack(alignment: .topTrailing) {
+            GrafanaWebView(
+                url: grafanaURL,
+                username: username,
+                password: password
+            )
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 34, height: 34)
+                    .background(.regularMaterial)
+                    .clipShape(Circle())
+                    .overlay(
+                        Circle()
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(radius: 8, y: 2)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut(.cancelAction)
+            .padding(14)
+            .help("Закрыть окно Grafana")
+        }
         .frame(
             width: preferredSize.width,
             height: preferredSize.height
         )
-    }
-}
-
-final class EscapeClosingWKWebView: WKWebView {
-    var onEscape: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            onEscape?()
-            return
-        }
-
-        super.keyDown(with: event)
     }
 }

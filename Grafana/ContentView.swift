@@ -9,6 +9,7 @@ import SwiftUI
 import AppKit
 import Combine
 import Darwin
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var manager = GrafanaManager.shared
@@ -95,30 +96,41 @@ struct ContentView: View {
                     showGrafanaWindow = false
                 }
             )
+            .interactiveDismissDisabled(true)
         }
     }
 
     private var sidebar: some View {
-        List(selection: $selectedSection) {
-            Section("Grafana") {
-                Label("Обзор", systemImage: "shippingbox")
-                    .tag(AppSection.overview)
-                Label("Метрики", systemImage: "waveform.path.ecg")
-                    .tag(AppSection.metrics)
-                Label("Скрипты", systemImage: "terminal")
-                    .tag(AppSection.scripts)
-                Label("Очистка", systemImage: "trash")
-                    .tag(AppSection.cleanup)
-                Label("Инструменты", systemImage: "wrench.and.screwdriver")
-                    .tag(AppSection.update)
-            }
+        VStack(spacing: 0) {
+            List(selection: $selectedSection) {
+                Section("Grafana") {
+                    Label("Обзор", systemImage: "shippingbox")
+                        .tag(AppSection.overview)
+                    Label("Метрики", systemImage: "waveform.path.ecg")
+                        .tag(AppSection.metrics)
+                    Label("Скрипты", systemImage: "terminal")
+                        .tag(AppSection.scripts)
+                    Label("Очистка", systemImage: "trash")
+                        .tag(AppSection.cleanup)
+                    Label("Инструменты", systemImage: "wrench.and.screwdriver")
+                        .tag(AppSection.update)
+                }
 
-            Section("Сервисы") {
-                ServiceRow(name: "Grafana", status: grafanaStatus)
-                ServiceRow(name: "Prometheus", status: prometheusStatus)
+                Section("Сервисы") {
+                    ServiceRow(name: "Grafana", status: grafanaStatus)
+                    ServiceRow(name: "Prometheus", status: prometheusStatus)
+                }
             }
+            .navigationTitle("Grafana")
+
+            Spacer(minLength: 0)
+
+            SidebarGrafanaButton {
+                openGrafanaWindow()
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 22)
         }
-        .navigationTitle("Grafana")
     }
 
     private var mainPanel: some View {
@@ -194,11 +206,6 @@ struct ContentView: View {
                     title: "История",
                     path: manager.historyMetricsURL.path,
                     size: byteCountText(for: folderSize(manager.historyMetricsURL))
-                )
-                StoragePathInfoRow(
-                    title: "БД Grafana",
-                    path: manager.grafanaDatabaseURL.path,
-                    size: byteCountText(for: fileSize(manager.grafanaDatabaseURL))
                 )
             }
         }
@@ -470,7 +477,7 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
     private var scriptsCard: some View {
         AppCard(title: "Скрипты") {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Скрипты лежат внутри Contents/Scripts. Их можно просматривать, запускать вручную и ставить во временное расписание. .openmetrics автоматически подхватывает importer.")
+                Text("Скрипты лежат внутри Contents/Scripts. В поле расписания можно писать 5s, 10m, 24h, 1m30s, 1h30m30s. Пусто = не запускать по расписанию. Значения сохраняются между запусками приложения.")
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 12) {
@@ -488,10 +495,31 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                     }
                     .buttonStyle(.bordered)
 
+                    Button {
+                        exportScripts()
+                    } label: {
+                        Label("Экспорт", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        importScripts()
+                    } label: {
+                        Label("Импорт", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        startAllScriptSchedules()
+                    } label: {
+                        Label("Запустить расписание", systemImage: "calendar.badge.play")
+                    }
+                    .buttonStyle(.borderedProminent)
+
                     Button(role: .destructive) {
                         cancelAllScriptSchedules()
                     } label: {
-                        Label("Отменить все запуски", systemImage: "xmark.circle")
+                        Label("Остановить расписание", systemImage: "calendar.badge.minus")
                     }
                     .buttonStyle(.bordered)
                     .disabled(!scriptScheduler.hasSchedules)
@@ -531,38 +559,44 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                                             Text("каждые \(schedule.label)")
                                                 .font(.caption)
                                                 .foregroundStyle(.secondary)
+                                        } else if !scriptScheduler.scheduleText(for: file).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                            Text("расписание задано, но не запущено")
+                                                .font(.caption)
+                                                .foregroundStyle(.orange)
                                         }
                                     }
                                 }
 
                                 Spacer()
 
-                                Menu("Запускать каждые") {
-                                    ForEach(ScriptScheduleOption.defaults) { option in
-                                        Button(option.label) {
-                                            scheduleScriptFile(file, every: option)
-                                        }
-                                    }
-
-                                    Divider()
-
-                                    Button("Отменить для скрипта", role: .destructive) {
-                                        cancelScriptSchedule(file)
-                                    }
-                                    .disabled(scriptScheduler.schedule(for: file) == nil)
-                                }
+                                TextField(
+                                    "5s / 10m / 1h30m30s",
+                                    text: Binding(
+                                        get: { scriptScheduler.scheduleText(for: file) },
+                                        set: { scriptScheduler.updateScheduleText($0, for: file) }
+                                    )
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(width: 190)
+                                .help("Расписание запуска: 5s, 10m, 24h, 1m30s, 1h30m30s. Пусто = не запускать по расписанию.")
 
                                 Button("Запустить") {
-                                    runScriptFile(file)
+                                    startScriptSchedule(file)
                                 }
                                 .buttonStyle(.borderedProminent)
+
+                                Button("Запустить 1 раз") {
+                                    runScriptFile(file)
+                                }
+                                .buttonStyle(.bordered)
                                 .disabled(scriptScheduler.isRunning(file))
 
                                 Button("Остановить") {
                                     stopScriptFile(file)
                                 }
                                 .buttonStyle(.bordered)
-                                .disabled(!scriptScheduler.isRunning(file))
+                                .disabled(!scriptScheduler.isRunning(file) && scriptScheduler.schedule(for: file) == nil)
 
                                 Button("Просмотреть") {
                                     previewScriptFile(file)
@@ -575,6 +609,20 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                         }
                     }
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Памятка по запуску")
+                        .font(.headline)
+
+                    Text("В поле рядом со скриптом укажи интервал: 5s, 10m, 24h, 1m30s, 1h30m30s. Пустое поле означает: не запускать по расписанию.")
+                        .foregroundStyle(.secondary)
+
+                    Text("Запустить — запускает расписание выбранного скрипта и сразу делает первый запуск. Запустить 1 раз — выполняет скрипт один раз без расписания. Остановить — останавливает текущий процесс и расписание этого скрипта. Запустить расписание — запускает расписания всех скриптов, у которых заполнено поле. Остановить расписание — отключает все расписания, но уже выполняющиеся процессы можно остановить отдельной кнопкой.")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(selectedScriptPreviewTitle)
@@ -889,6 +937,15 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
             lastActionMessage = "Workspace готов. Grafana и Prometheus запущены автоматически.\nApp: \(manager.appBundleURL.path)\nResources: \(manager.resourcesURL.path)\nWorkspace: \(manager.workspaceURL.path)\nScripts: \(manager.scriptsURL.path)\nMonitoring: \(manager.monitoringURL.path)\n\n\(grafanaCredentialsStatusText())"
             updateMessage = updateManager.updatePlanText()
             fileListRefreshToken += 1
+
+            do {
+                let scheduleResult = try scriptScheduler.startAllStoredSchedules(scriptFiles: scriptFiles())
+                if scheduleResult.started > 0 {
+                    lastActionMessage += "\n\nРасписания скриптов запущены автоматически. Запущено: \(scheduleResult.started), пропущено: \(scheduleResult.skipped)."
+                }
+            } catch {
+                lastActionMessage += "\n\nНе удалось автоматически запустить расписания скриптов: \(error.localizedDescription)"
+            }
         } catch {
             grafanaStatus = .warning
             prometheusStatus = .warning
@@ -1117,29 +1174,275 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
         }
     }
 
+    private func exportScripts() {
+        let panel = NSSavePanel()
+        panel.title = "Экспорт scripts.zip"
+        panel.nameFieldStringValue = "Grafana-Scripts.zip"
+        panel.allowedContentTypes = [.zip]
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let destinationURL = panel.url else {
+            lastActionMessage = "Экспорт скриптов отменён."
+            return
+        }
+
+        lastActionMessage = "Экспортирую Contents/Scripts в архив:\n\(destinationURL.path)"
+
+        Task.detached {
+            do {
+                try exportScriptsArchive(to: destinationURL)
+
+                await MainActor.run {
+                    appSize = manager.appSizeText()
+                    refreshFileLists()
+                    lastActionMessage = "Скрипты экспортированы в архив:\n\(destinationURL.path)"
+                }
+            } catch {
+                await MainActor.run {
+                    lastActionMessage = "Не удалось экспортировать скрипты: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func importScripts() {
+        let panel = NSOpenPanel()
+        panel.title = "Импорт скриптов"
+        panel.message = "Выбери .sh/.zsh/.command, папку со скриптами или zip-архив, созданный экспортом."
+        panel.prompt = "Импортировать"
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowedContentTypes = [.shellScript, .zip]
+
+        guard panel.runModal() == .OK else {
+            lastActionMessage = "Импорт скриптов отменён."
+            return
+        }
+
+        let selectedURLs = panel.urls
+        lastActionMessage = "Импортирую скрипты:\n\(selectedURLs.map(\.path).joined(separator: "\n"))"
+
+        Task.detached {
+            do {
+                let importedCount = try importScriptItems(selectedURLs)
+
+                await MainActor.run {
+                    refreshFileLists()
+                    appSize = manager.appSizeText()
+                    lastActionMessage = "Импорт скриптов завершён. Импортировано файлов: \(importedCount).\n\nПапка Scripts:\n\(manager.scriptsURL.path)"
+                }
+            } catch {
+                await MainActor.run {
+                    refreshFileLists()
+                    appSize = manager.appSizeText()
+                    lastActionMessage = "Не удалось импортировать скрипты: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func exportScriptsArchive(to destinationURL: URL) throws {
+        try FileManager.default.createDirectory(at: manager.scriptsURL, withIntermediateDirectories: true)
+
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+
+        try runCommand(
+            executable: "/usr/bin/ditto",
+            arguments: [
+                "-c",
+                "-k",
+                "--sequesterRsrc",
+                "--keepParent",
+                manager.scriptsURL.path,
+                destinationURL.path
+            ]
+        )
+    }
+
+    private func importScriptItems(_ urls: [URL]) throws -> Int {
+        try FileManager.default.createDirectory(at: manager.scriptsURL, withIntermediateDirectories: true)
+
+        var importedCount = 0
+        for url in urls {
+            if isDirectory(url) {
+                importedCount += try importScriptsFromDirectory(url)
+            } else if url.pathExtension.lowercased() == "zip" {
+                importedCount += try importScriptsFromZip(url)
+            } else if isImportableScript(url) {
+                try importSingleScript(url)
+                importedCount += 1
+            }
+        }
+
+        return importedCount
+    }
+
+    private func importScriptsFromZip(_ zipURL: URL) throws -> Int {
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("grafana-scripts-import-\(UUID().uuidString)", isDirectory: true)
+
+        try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+
+        try runCommand(
+            executable: "/usr/bin/ditto",
+            arguments: [
+                "-x",
+                "-k",
+                zipURL.path,
+                tempDirectory.path
+            ]
+        )
+
+        return try importScriptsFromDirectory(tempDirectory)
+    }
+
+    private func importScriptsFromDirectory(_ directoryURL: URL) throws -> Int {
+        let scripts = scriptImportCandidates(in: directoryURL)
+        var importedCount = 0
+
+        for script in scripts {
+            try importSingleScript(script)
+            importedCount += 1
+        }
+
+        return importedCount
+    }
+
+    private func scriptImportCandidates(in directoryURL: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        var scripts: [URL] = []
+        for case let fileURL as URL in enumerator {
+            if fileURL.pathComponents.contains("logs") {
+                continue
+            }
+
+            if isImportableScript(fileURL) {
+                scripts.append(fileURL)
+            }
+        }
+
+        return scripts.sorted { lhs, rhs in
+            lhs.lastPathComponent.localizedStandardCompare(rhs.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    private func importSingleScript(_ sourceURL: URL) throws {
+        let destinationURL = uniqueScriptDestinationURL(for: sourceURL.lastPathComponent)
+        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+
+        let executableAttributes: [FileAttributeKey: Any] = [
+            .posixPermissions: 0o755
+        ]
+        try FileManager.default.setAttributes(executableAttributes, ofItemAtPath: destinationURL.path)
+    }
+
+    private func uniqueScriptDestinationURL(for fileName: String) -> URL {
+        let baseName = (fileName as NSString).deletingPathExtension
+        let fileExtension = (fileName as NSString).pathExtension
+        var candidate = manager.scriptsURL.appendingPathComponent(fileName)
+        var index = 1
+
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let nextName: String
+            if fileExtension.isEmpty {
+                nextName = "\(baseName)-\(index)"
+            } else {
+                nextName = "\(baseName)-\(index).\(fileExtension)"
+            }
+
+            candidate = manager.scriptsURL.appendingPathComponent(nextName)
+            index += 1
+        }
+
+        return candidate
+    }
+
+    private func isImportableScript(_ url: URL) -> Bool {
+        let allowedExtensions: Set<String> = ["sh", "zsh", "command"]
+        return allowedExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    private func runCommand(executable: String, arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let output = String(data: outputPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let error = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "Grafana.ScriptsArchive",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "Command failed: \(executable) \(arguments.joined(separator: " "))\n\(output)\n\(error)"]
+            )
+        }
+    }
+
     private func runScriptFile(_ url: URL) {
         scriptScheduler.runScript(url)
         lastActionMessage = "Запускаю скрипт:\n\(url.path)"
     }
 
     private func stopScriptFile(_ url: URL) {
-        scriptScheduler.stopScript(url)
-        lastActionMessage = "Останавливаю скрипт:\n\(url.path)"
+        scriptScheduler.stopScriptAndSchedule(url)
+        lastActionMessage = "Останавливаю скрипт и его расписание:\n\(url.path)"
     }
 
-    private func scheduleScriptFile(_ url: URL, every option: ScriptScheduleOption) {
-        scriptScheduler.scheduleScript(url, every: option.interval, label: option.label)
-        lastActionMessage = "Скрипт поставлен в расписание каждые \(option.label):\n\(url.path)"
+    private func startScriptSchedule(_ url: URL) {
+        do {
+            let label = try scriptScheduler.startSchedule(for: url)
+            if label.isEmpty {
+                lastActionMessage = "Расписание не запущено: поле расписания пустое.\n\(url.path)"
+            } else {
+                lastActionMessage = "Расписание запущено каждые \(label):\n\(url.path)"
+            }
+        } catch {
+            lastActionMessage = "Не удалось запустить расписание: \(error.localizedDescription)\n\(url.path)"
+        }
     }
 
     private func cancelScriptSchedule(_ url: URL) {
         scriptScheduler.cancelSchedule(for: url)
-        lastActionMessage = "Расписание отменено для скрипта:\n\(url.path)"
+        lastActionMessage = "Расписание остановлено для скрипта:\n\(url.path)"
+    }
+
+    private func startAllScriptSchedules() {
+        do {
+            let result = try scriptScheduler.startAllStoredSchedules(scriptFiles: currentScriptFiles)
+            lastActionMessage = "Запуск расписаний завершён. Запущено: \(result.started), пропущено: \(result.skipped)."
+        } catch {
+            lastActionMessage = "Не удалось запустить расписания: \(error.localizedDescription)"
+        }
     }
 
     private func cancelAllScriptSchedules() {
         scriptScheduler.cancelAllSchedules()
-        lastActionMessage = "Все расписания скриптов отменены. Уже запущенные скрипты можно остановить отдельной кнопкой “Остановить”."
+        lastActionMessage = "Все расписания скриптов остановлены. Уже запущенные скрипты можно остановить отдельной кнопкой “Остановить”."
     }
 
     private func folderSize(_ url: URL) -> Int64 {
@@ -1371,28 +1674,17 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
     }
 }
 
-private struct ScriptScheduleOption: Identifiable {
-    let id = UUID()
-    let label: String
-    let interval: TimeInterval
 
-    static let defaults: [ScriptScheduleOption] = [
-        ScriptScheduleOption(label: "5 сек", interval: 5),
-        ScriptScheduleOption(label: "10 сек", interval: 10),
-        ScriptScheduleOption(label: "30 сек", interval: 30),
-        ScriptScheduleOption(label: "1 мин", interval: 60),
-        ScriptScheduleOption(label: "5 мин", interval: 300),
-        ScriptScheduleOption(label: "15 мин", interval: 900),
-        ScriptScheduleOption(label: "1 час", interval: 3600),
-        ScriptScheduleOption(label: "6 часов", interval: 21600),
-        ScriptScheduleOption(label: "24 часа", interval: 86400)
-    ]
-}
 
 private struct ScriptScheduleState {
     let path: String
     let label: String
     let interval: TimeInterval
+}
+
+private struct ScriptScheduleStartResult {
+    let started: Int
+    let skipped: Int
 }
 
 @MainActor
@@ -1403,13 +1695,17 @@ private final class ScriptScheduler: ObservableObject {
     @Published private(set) var lastRunOutput = "Запусти скрипт, чтобы увидеть вывод."
     @Published private(set) var scriptStates: [String: String] = [:]
 
+    @Published private var storedScheduleTexts: [String: String] = [:]
+
     private let manager: GrafanaManager
     private var timers: [String: Timer] = [:]
     private var processes: [String: Process] = [:]
     private var processLogFiles: [String: URL] = [:]
+    private let storedScheduleTextsKey = "grafana.script.schedule.texts.v1"
 
     init(manager: GrafanaManager) {
         self.manager = manager
+        self.storedScheduleTexts = UserDefaults.standard.dictionary(forKey: storedScheduleTextsKey) as? [String: String] ?? [:]
     }
 
     var hasRunningScripts: Bool {
@@ -1426,6 +1722,24 @@ private final class ScriptScheduler: ObservableObject {
 
     func schedule(for url: URL) -> ScriptScheduleState? {
         schedules[url.path]
+    }
+
+    func scheduleText(for url: URL) -> String {
+        storedScheduleTexts[url.path] ?? ""
+    }
+
+    func updateScheduleText(_ text: String, for url: URL) {
+        let path = url.path
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if normalized.isEmpty {
+            storedScheduleTexts.removeValue(forKey: path)
+            cancelSchedule(for: url)
+        } else {
+            storedScheduleTexts[path] = normalized
+        }
+
+        UserDefaults.standard.set(storedScheduleTexts, forKey: storedScheduleTextsKey)
     }
 
     func state(for url: URL) -> String? {
@@ -1562,6 +1876,11 @@ private final class ScriptScheduler: ObservableObject {
         lastRunOutput = "Отправлен terminate для процесса скрипта и его дочерних процессов.\n\(path)"
     }
 
+    func stopScriptAndSchedule(_ url: URL) {
+        cancelSchedule(for: url)
+        stopScript(url)
+    }
+
     private func terminateProcessTree(_ process: Process) {
         let pid = process.processIdentifier
         terminateChildren(of: pid)
@@ -1595,7 +1914,38 @@ private final class ScriptScheduler: ObservableObject {
         }
     }
 
-    func scheduleScript(_ url: URL, every interval: TimeInterval, label: String) {
+    @discardableResult
+    func startSchedule(for url: URL) throws -> String {
+        let text = scheduleText(for: url).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            cancelSchedule(for: url)
+            return ""
+        }
+
+        let interval = try parseScheduleInterval(text)
+        scheduleScript(url, every: interval, label: text)
+        return text
+    }
+
+    func startAllStoredSchedules(scriptFiles: [URL]) throws -> ScriptScheduleStartResult {
+        var started = 0
+        var skipped = 0
+
+        for file in scriptFiles {
+            let text = scheduleText(for: file).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                skipped += 1
+                continue
+            }
+
+            _ = try startSchedule(for: file)
+            started += 1
+        }
+
+        return ScriptScheduleStartResult(started: started, skipped: skipped)
+    }
+
+    private func scheduleScript(_ url: URL, every interval: TimeInterval, label: String) {
         let path = url.path
         timers[path]?.invalidate()
 
@@ -1610,6 +1960,66 @@ private final class ScriptScheduler: ObservableObject {
         timers[path] = timer
 
         runScript(url)
+    }
+
+    private func parseScheduleInterval(_ text: String) throws -> TimeInterval {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !value.isEmpty else {
+            throw scheduleError("Поле расписания пустое.")
+        }
+
+        let pattern = #"(\d+)([smh])"#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let nsRange = NSRange(value.startIndex..<value.endIndex, in: value)
+        let matches = regex.matches(in: value, range: nsRange)
+
+        guard !matches.isEmpty else {
+            throw scheduleError("Неверный формат расписания '\(text)'. Примеры: 5s, 10m, 24h, 1m30s, 1h30m30s.")
+        }
+
+        var consumedRanges: [NSRange] = []
+        var total: TimeInterval = 0
+
+        for match in matches {
+            guard match.numberOfRanges == 3,
+                  let numberRange = Range(match.range(at: 1), in: value),
+                  let unitRange = Range(match.range(at: 2), in: value),
+                  let amount = Double(value[numberRange]) else {
+                throw scheduleError("Неверный формат расписания '\(text)'.")
+            }
+
+            consumedRanges.append(match.range)
+            let unit = String(value[unitRange])
+            switch unit {
+            case "s":
+                total += amount
+            case "m":
+                total += amount * 60
+            case "h":
+                total += amount * 60 * 60
+            default:
+                throw scheduleError("Неизвестная единица времени '\(unit)'. Используй s, m или h.")
+            }
+        }
+
+        let consumedLength = consumedRanges.reduce(0) { $0 + $1.length }
+        guard consumedLength == nsRange.length else {
+            throw scheduleError("Неверный формат расписания '\(text)'. Не должно быть пробелов или лишних символов. Примеры: 5s, 10m, 1h30m30s.")
+        }
+
+        guard total >= 1 else {
+            throw scheduleError("Интервал должен быть не меньше 1 секунды.")
+        }
+
+        return total
+    }
+
+    private func scheduleError(_ message: String) -> NSError {
+        NSError(
+            domain: "Grafana.ScriptSchedule",
+            code: 2001,
+            userInfo: [NSLocalizedDescriptionKey: message]
+        )
     }
 
     func cancelSchedule(for url: URL) {
@@ -1723,6 +2133,7 @@ private struct StoragePathInfoRow: View {
     }
 }
 
+
 private struct StorageActionPathInfoRow: View {
     let title: String
     let path: String
@@ -1754,6 +2165,71 @@ private struct StorageActionPathInfoRow: View {
             .buttonStyle(.bordered)
             .disabled(isDisabled)
         }
+    }
+}
+
+private struct SidebarGrafanaButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.02, green: 0.04, blue: 0.10),
+                                    Color(red: 0.01, green: 0.13, blue: 0.28),
+                                    Color(red: 0.00, green: 0.03, blue: 0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [.cyan.opacity(0.9), .blue.opacity(0.65), .white.opacity(0.18)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1.5
+                                )
+                        )
+                        .shadow(color: .blue.opacity(0.35), radius: 16, x: 0, y: 0)
+
+                    Text("G")
+                        .font(.system(size: 78, weight: .black, design: .rounded))
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [.cyan, .blue, .white],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .shadow(color: .cyan.opacity(0.8), radius: 10, x: 0, y: 0)
+                        .shadow(color: .blue.opacity(0.9), radius: 20, x: 0, y: 0)
+                }
+                .frame(width: 150, height: 120)
+
+                Text("Открыть Grafana")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Открыть Grafana UI")
     }
 }
 
