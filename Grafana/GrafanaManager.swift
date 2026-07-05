@@ -158,6 +158,14 @@ final class GrafanaManager: ObservableObject {
         grafanaDataURL.appendingPathComponent("admin-credentials.txt")
     }
 
+    var grafanaDatabaseURL: URL {
+        grafanaDataURL.appendingPathComponent("grafana.db")
+    }
+
+    var quarantineRootURL: URL {
+        workspaceURL
+    }
+
     func prepareWorkspace() throws {
         let directories = [
             workspaceURL,
@@ -197,7 +205,16 @@ final class GrafanaManager: ObservableObject {
     }
 
     func metricsFilePath() -> String {
-        "Scripts: \(scriptsURL.path)\nHistory pending: \(historyPendingURL.path)\nHistory imported: \(historyImportedURL.path)\nHistory failed: \(historyFailedURL.path)\nState: \(statusStateURL.path)"
+        """
+        Prometheus DB / TSDB: \(prometheusDataURL.path)
+        Grafana DB: \(grafanaDatabaseURL.path)
+        Metrics history: \(historyMetricsURL.path)
+        History pending: \(historyPendingURL.path)
+        History imported: \(historyImportedURL.path)
+        History failed: \(historyFailedURL.path)
+        Scripts: \(scriptsURL.path)
+        State: \(statusStateURL.path)
+        """
     }
 
     func grafanaAdminCredentialsText() -> String {
@@ -221,23 +238,7 @@ final class GrafanaManager: ObservableObject {
         )
     }
     func clearMonitoringData() throws {
-        let targets = [
-            historyPendingURL,
-            historyImportedURL,
-            historyFailedURL,
-            monitoringStateURL
-        ]
-
-        for target in targets where fileManager.fileExists(atPath: target.path) {
-            try fileManager.removeItem(at: target)
-        }
-
-        try fileManager.createDirectory(at: historyPendingURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: historyImportedURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: historyFailedURL, withIntermediateDirectories: true)
-        try fileManager.createDirectory(at: monitoringStateURL, withIntermediateDirectories: true)
-        try defaultStatusStateText.write(to: statusStateURL, atomically: true, encoding: .utf8)
-        try "[]".write(to: importedMetricsRegistryURL, atomically: true, encoding: .utf8)
+        try quarantineMonitoringHistory()
     }
 
     func clearUpdateCache() throws {
@@ -270,17 +271,19 @@ final class GrafanaManager: ObservableObject {
     }
 
     func clearPrometheusHistory() throws {
-        try removeDirectoryContents(at: prometheusDataURL)
-        try fileManager.createDirectory(at: prometheusDataURL, withIntermediateDirectories: true)
+        try quarantinePrometheusTSDB(restartPrometheus: false, retentionDays: 30, retentionSizeGb: 2)
     }
 
     func resetAllMutableData() throws {
+        try stopAll()
+        try quarantinePrometheusTSDB(restartPrometheus: false, retentionDays: 30, retentionSizeGb: 2)
+        try quarantineGrafanaDB()
+        try quarantineMonitoringHistory()
+
         let targets = [
-            grafanaDataURL,
             grafanaLogsURL,
             grafanaPluginsURL,
             grafanaProvisioningURL,
-            prometheusDataURL,
             logsURL
         ]
 
@@ -288,6 +291,8 @@ final class GrafanaManager: ObservableObject {
             try removeDirectoryContents(at: target)
             try fileManager.createDirectory(at: target, withIntermediateDirectories: true)
         }
+
+        _ = try ensureGrafanaAdminCredentials()
     }
 
     func requiredFilesReport() -> [RequiredFileStatus] {
@@ -458,8 +463,24 @@ final class GrafanaManager: ObservableObject {
                 }
             }
 
-            guard !filesToImport.isEmpty else {
-                try importerStatusText(imported: 0, failed: 0, skipped: skippedCount).write(
+            var validFilesToImport: [URL] = []
+            var importedCount = 0
+            var failedCount = 0
+
+            for file in filesToImport {
+                do {
+                    try validateMetricsFileBeforeImport(file, retentionDays: retentionDays)
+                    validFilesToImport.append(file)
+                } catch {
+                    failedCount += 1
+                    let destination = uniqueDestinationURL(for: file.lastPathComponent, in: historyFailedURL)
+                    try? moveReplacingIfNeeded(file, to: destination)
+                    try? writeImporterError(error, for: destination)
+                }
+            }
+
+            guard !validFilesToImport.isEmpty else {
+                try importerStatusText(imported: importedCount, failed: failedCount, skipped: skippedCount).write(
                     to: monitoringStateURL.appendingPathComponent("last-importer-scan.txt"),
                     atomically: true,
                     encoding: .utf8
@@ -469,10 +490,7 @@ final class GrafanaManager: ObservableObject {
 
             stopManagedProcess(pidFileURL: prometheusPIDURL, tcpPort: 9090)
 
-            var importedCount = 0
-            var failedCount = 0
-
-            for file in filesToImport {
+            for file in validFilesToImport {
                 do {
                     try importMetricsFile(file)
                     let fingerprint = try metricsFileFingerprint(file)
@@ -502,6 +520,384 @@ final class GrafanaManager: ObservableObject {
                 _ = try? startPrometheus(retentionDays: retentionDays, retentionSizeGb: retentionSizeGb)
             }
         }
+    }
+    func quarantinePrometheusTSDB(restartPrometheus: Bool, retentionDays: Int, retentionSizeGb: Int) throws {
+        stopManagedProcess(pidFileURL: prometheusPIDURL, tcpPort: 9090)
+        try quarantineItemIfExists(prometheusDataURL, quarantineName: "prometheus_data")
+        try fileManager.createDirectory(at: prometheusDataURL, withIntermediateDirectories: true)
+
+        if restartPrometheus {
+            _ = try startPrometheus(retentionDays: retentionDays, retentionSizeGb: retentionSizeGb)
+        }
+    }
+
+    func quarantineGrafanaDB() throws {
+        stopManagedProcess(pidFileURL: grafanaPIDURL, tcpPort: 3000)
+        try fileManager.createDirectory(at: grafanaDataURL, withIntermediateDirectories: true)
+        try quarantineItemIfExists(grafanaDatabaseURL, quarantineName: "grafana.db")
+        _ = try ensureGrafanaAdminCredentials()
+    }
+
+    func quarantineMonitoringHistory() throws {
+        try quarantineItemIfExists(historyMetricsURL, quarantineName: "metrics_history")
+        try fileManager.createDirectory(at: historyPendingURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: historyImportedURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: historyFailedURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: monitoringStateURL, withIntermediateDirectories: true)
+        try defaultStatusStateText.write(to: statusStateURL, atomically: true, encoding: .utf8)
+        try "[]".write(to: importedMetricsRegistryURL, atomically: true, encoding: .utf8)
+    }
+
+    func resetRuntimeDataToQuarantine(retentionDays: Int, retentionSizeGb: Int) throws {
+        try stopAll()
+        try quarantinePrometheusTSDB(restartPrometheus: false, retentionDays: retentionDays, retentionSizeGb: retentionSizeGb)
+        try quarantineGrafanaDB()
+        try quarantineMonitoringHistory()
+        try fileManager.createDirectory(at: scriptsURL, withIntermediateDirectories: true)
+    }
+
+    func prometheusTSDBDiagnosticsText() -> String {
+        do {
+            let report = try prometheusTSDBDiagnostics()
+            return report.text
+        } catch {
+            return "Не удалось проверить Prometheus TSDB: \(error.localizedDescription)\nПуть: \(prometheusDataURL.path)"
+        }
+    }
+    private func validateMetricsFileBeforeImport(_ file: URL, retentionDays: Int) throws {
+        let text = try String(contentsOf: file, encoding: .utf8)
+        let rawLines = text.components(separatedBy: .newlines)
+        let meaningfulLines = rawLines.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+
+        guard meaningfulLines.last == "# EOF" else {
+            throw metricsPreflightError("OpenMetrics file must end with '# EOF'.")
+        }
+
+        let sampleLines = meaningfulLines.filter { !$0.hasPrefix("#") }
+        guard !sampleLines.isEmpty else {
+            throw metricsPreflightError("OpenMetrics file contains no sample lines.")
+        }
+
+        let now = Date().timeIntervalSince1970
+        let maxAllowedTimestamp = now + 5 * 60
+        let minAllowedTimestamp = now - Double(retentionDays) * 24 * 60 * 60
+
+        for (index, line) in sampleLines.enumerated() {
+            try validateMetricsSampleLine(
+                line,
+                sampleIndex: index + 1,
+                minAllowedTimestamp: minAllowedTimestamp,
+                maxAllowedTimestamp: maxAllowedTimestamp
+            )
+        }
+    }
+
+    private func validateMetricsSampleLine(
+        _ line: String,
+        sampleIndex: Int,
+        minAllowedTimestamp: TimeInterval,
+        maxAllowedTimestamp: TimeInterval
+    ) throws {
+        let tokens = splitMetricsSampleLine(line)
+        guard tokens.count >= 3 else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) has no timestamp. promtool expects '<metric> <value> <timestamp>'. Line: \(line)")
+        }
+
+        let seriesToken = tokens[0]
+        let valueToken = tokens[1]
+        let timestampToken = tokens[2]
+
+        guard Double(valueToken) != nil else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) has invalid value '\(valueToken)'. Line: \(line)")
+        }
+
+        guard let timestamp = Double(timestampToken) else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) has invalid timestamp '\(timestampToken)'. Line: \(line)")
+        }
+
+        if isMillisecondsTimestampToken(timestampToken) {
+            throw metricsPreflightError("Sample line #\(sampleIndex) timestamp looks like milliseconds; OpenMetrics import expects seconds. Timestamp: \(timestampToken)")
+        }
+
+        guard timestamp <= maxAllowedTimestamp else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) timestamp is in the future. Expected not later than now + 5 minutes. Timestamp: \(timestampToken)")
+        }
+
+        guard timestamp >= minAllowedTimestamp else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) timestamp is older than Prometheus retention. Timestamp: \(timestampToken)")
+        }
+
+        try validateMetricSeriesToken(seriesToken, sampleIndex: sampleIndex, originalLine: line)
+    }
+
+    private func splitMetricsSampleLine(_ line: String) -> [String] {
+        var tokens: [String] = []
+        var current = ""
+        var inQuotes = false
+        var escaping = false
+        var braceDepth = 0
+
+        for character in line {
+            if escaping {
+                current.append(character)
+                escaping = false
+                continue
+            }
+
+            if character == "\\" && inQuotes {
+                current.append(character)
+                escaping = true
+                continue
+            }
+
+            if character == "\"" {
+                current.append(character)
+                inQuotes.toggle()
+                continue
+            }
+
+            if !inQuotes {
+                if character == "{" {
+                    braceDepth += 1
+                    current.append(character)
+                    continue
+                }
+
+                if character == "}" {
+                    braceDepth = max(0, braceDepth - 1)
+                    current.append(character)
+                    continue
+                }
+
+                if character.isWhitespace && braceDepth == 0 {
+                    if !current.isEmpty {
+                        tokens.append(current)
+                        current = ""
+                    }
+                    continue
+                }
+            }
+
+            current.append(character)
+        }
+
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+
+        return tokens
+    }
+
+    private func validateMetricSeriesToken(_ token: String, sampleIndex: Int, originalLine: String) throws {
+        let metricName: String
+        let labelsText: String?
+
+        if let openBraceIndex = token.firstIndex(of: "{") {
+            guard token.last == "}" else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) has broken labels. Line: \(originalLine)")
+            }
+
+            metricName = String(token[..<openBraceIndex])
+            labelsText = String(token[token.index(after: openBraceIndex)..<token.index(before: token.endIndex)])
+        } else {
+            metricName = token
+            labelsText = nil
+        }
+
+        guard isValidPrometheusName(metricName) else {
+            throw metricsPreflightError("Sample line #\(sampleIndex) has invalid metric name '\(metricName)'.")
+        }
+
+        if let labelsText, !labelsText.isEmpty {
+            try validateLabelsText(labelsText, sampleIndex: sampleIndex, originalLine: originalLine)
+        }
+    }
+
+    private func validateLabelsText(_ text: String, sampleIndex: Int, originalLine: String) throws {
+        var position = text.startIndex
+
+        while position < text.endIndex {
+            let nameStart = position
+            while position < text.endIndex && text[position] != "=" {
+                position = text.index(after: position)
+            }
+
+            guard position < text.endIndex else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) has label without '='. Line: \(originalLine)")
+            }
+
+            let labelName = String(text[nameStart..<position]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isValidPrometheusName(labelName) else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) has invalid label name '\(labelName)'.")
+            }
+
+            position = text.index(after: position)
+            guard position < text.endIndex, text[position] == "\"" else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) label '\(labelName)' value must be quoted. Line: \(originalLine)")
+            }
+
+            position = text.index(after: position)
+            var closedQuote = false
+            var escaping = false
+
+            while position < text.endIndex {
+                let character = text[position]
+                if escaping {
+                    escaping = false
+                    position = text.index(after: position)
+                    continue
+                }
+
+                if character == "\\" {
+                    escaping = true
+                    position = text.index(after: position)
+                    continue
+                }
+
+                if character == "\"" {
+                    closedQuote = true
+                    position = text.index(after: position)
+                    break
+                }
+
+                position = text.index(after: position)
+            }
+
+            guard closedQuote else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) label '\(labelName)' has unclosed quote. Line: \(originalLine)")
+            }
+
+            if position == text.endIndex {
+                break
+            }
+
+            guard text[position] == "," else {
+                throw metricsPreflightError("Sample line #\(sampleIndex) labels must be separated by commas. Line: \(originalLine)")
+            }
+
+            position = text.index(after: position)
+        }
+    }
+
+    private func isValidPrometheusName(_ value: String) -> Bool {
+        guard let first = value.unicodeScalars.first else {
+            return false
+        }
+
+        let firstAllowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_:")
+        let restAllowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_:")
+
+        guard firstAllowed.contains(first) else {
+            return false
+        }
+
+        return value.unicodeScalars.dropFirst().allSatisfy { restAllowed.contains($0) }
+    }
+
+    private func isMillisecondsTimestampToken(_ token: String) -> Bool {
+        let normalized = token.split(separator: ".", maxSplits: 1).first.map(String.init) ?? token
+        return normalized.count == 13 && normalized.allSatisfy { $0.isNumber }
+    }
+
+    private func metricsPreflightError(_ message: String) -> NSError {
+        NSError(
+            domain: "GrafanaManager.Preflight",
+            code: 1001,
+            userInfo: [NSLocalizedDescriptionKey: "Metrics preflight validation failed: \(message)"]
+        )
+    }
+    private func quarantineItemIfExists(_ sourceURL: URL, quarantineName: String) throws {
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            return
+        }
+
+        let quarantineDirectory = try createQuarantineDirectory()
+        let destination = uniqueDestinationURL(for: quarantineName, in: quarantineDirectory)
+        try moveReplacingIfNeeded(sourceURL, to: destination)
+    }
+
+    private func createQuarantineDirectory() throws -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let directory = quarantineRootURL.appendingPathComponent("quarantine_\(formatter.string(from: Date()))", isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private func prometheusTSDBDiagnostics() throws -> PrometheusTSDBDiagnosticsReport {
+        guard fileManager.fileExists(atPath: prometheusDataURL.path) else {
+            return PrometheusTSDBDiagnosticsReport(
+                blockCount: 0,
+                earliestMinTime: nil,
+                latestMaxTime: nil,
+                futureBlockCount: 0,
+                text: "Prometheus TSDB folder does not exist: \(prometheusDataURL.path)"
+            )
+        }
+
+        let contents = try fileManager.contentsOfDirectory(at: prometheusDataURL, includingPropertiesForKeys: [.isDirectoryKey])
+        var blockCount = 0
+        var earliestMinTime: Double?
+        var latestMaxTime: Double?
+        var futureBlockCount = 0
+        let nowMilliseconds = Date().timeIntervalSince1970 * 1000
+        let futureThreshold = nowMilliseconds + 5 * 60 * 1000
+
+        for item in contents {
+            let values = try? item.resourceValues(forKeys: [.isDirectoryKey])
+            guard values?.isDirectory == true else {
+                continue
+            }
+
+            let metaURL = item.appendingPathComponent("meta.json")
+            guard fileManager.fileExists(atPath: metaURL.path) else {
+                continue
+            }
+
+            let data = try Data(contentsOf: metaURL)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+
+            guard let minTime = json["minTime"] as? Double ?? (json["minTime"] as? Int).map(Double.init),
+                  let maxTime = json["maxTime"] as? Double ?? (json["maxTime"] as? Int).map(Double.init) else {
+                continue
+            }
+
+            blockCount += 1
+            earliestMinTime = min(earliestMinTime ?? minTime, minTime)
+            latestMaxTime = max(latestMaxTime ?? maxTime, maxTime)
+
+            if minTime > futureThreshold || maxTime > futureThreshold {
+                futureBlockCount += 1
+            }
+        }
+
+        let text = """
+        Prometheus TSDB: \(prometheusDataURL.path)
+        Blocks: \(blockCount)
+        Earliest minTime: \(formatPrometheusMilliseconds(earliestMinTime))
+        Latest maxTime: \(formatPrometheusMilliseconds(latestMaxTime))
+        Future blocks detected: \(futureBlockCount)
+        \(futureBlockCount > 0 ? "WARNING: future blocks detected. Consider quarantining Prometheus TSDB." : "Future blocks not detected.")
+        """
+
+        return PrometheusTSDBDiagnosticsReport(
+            blockCount: blockCount,
+            earliestMinTime: earliestMinTime,
+            latestMaxTime: latestMaxTime,
+            futureBlockCount: futureBlockCount,
+            text: text
+        )
+    }
+
+    private func formatPrometheusMilliseconds(_ milliseconds: Double?) -> String {
+        guard let milliseconds else {
+            return "none"
+        }
+
+        let date = Date(timeIntervalSince1970: milliseconds / 1000)
+        return "\(DateFormatter.localizedString(from: date, dateStyle: .medium, timeStyle: .medium)) (\(Int64(milliseconds)) ms)"
     }
 
     private func pendingMetricsFiles(in directory: URL) throws -> [URL] {
@@ -916,3 +1312,12 @@ struct GrafanaServiceStatuses {
     let exporterRunning: Bool
 }
 
+
+
+struct PrometheusTSDBDiagnosticsReport {
+    let blockCount: Int
+    let earliestMinTime: Double?
+    let latestMaxTime: Double?
+    let futureBlockCount: Int
+    let text: String
+}

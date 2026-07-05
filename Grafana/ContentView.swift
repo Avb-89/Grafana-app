@@ -56,9 +56,6 @@ struct ContentView: View {
         return scriptFiles()
     }
 
-    private var grafanaDatabaseURL: URL {
-        manager.grafanaDataURL.appendingPathComponent("grafana.db")
-    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -81,7 +78,7 @@ struct ContentView: View {
                 resetEverything()
             }
         } message: {
-            Text("Будут удалены история Prometheus, Grafana DB, логи, плагины и служебные файлы внутри Workspace. Contents/Scripts и Contents/Monitoring не трогаются.")
+            Text("Prometheus TSDB, Grafana DB и Monitoring history будут остановлены и перенесены в quarantine внутри Workspace. Contents/Scripts не трогаются.")
         }
         .onAppear {
             prepareWorkspace()
@@ -200,8 +197,8 @@ struct ContentView: View {
                 )
                 StoragePathInfoRow(
                     title: "БД Grafana",
-                    path: grafanaDatabaseURL.path,
-                    size: byteCountText(for: fileSize(grafanaDatabaseURL))
+                    path: manager.grafanaDatabaseURL.path,
+                    size: byteCountText(for: fileSize(manager.grafanaDatabaseURL))
                 )
             }
         }
@@ -242,7 +239,7 @@ struct ContentView: View {
                 if isUpdatingComponents {
                     VStack(alignment: .leading, spacing: 8) {
                         ProgressView(value: updateProgress, total: 1.0) {
-                            Text(updateProgressMessage.isEmpty ? "Готовлю обновление компонентов..." : updateProgressMessage)
+                            Text(updateProgressMessage.isEmpty ? "Готовлю установку компонентов..." : updateProgressMessage)
                         }
 
                         HStack(spacing: 10) {
@@ -254,7 +251,7 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        Text("Стадии: скачать Grafana → распаковать Grafana → скачать Prometheus → распаковать Prometheus → обновить Workspace → проверить запуск.")
+                        Text("Стадии: скачать Grafana → распаковать Grafana → скачать Prometheus → распаковать Prometheus → установить в Workspace → проверить запуск.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -654,14 +651,30 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
     }
 
     private var storageInfoCard: some View {
-        AppCard(title: "Размеры") {
+        AppCard(title: "Реальные пути") {
             VStack(alignment: .leading, spacing: 10) {
                 PathInfoRow(title: "Всё приложение", value: appSize)
+                StorageActionPathInfoRow(
+                    title: "Prometheus TSDB",
+                    path: manager.prometheusDataURL.path,
+                    size: byteCountText(for: folderSize(manager.prometheusDataURL)),
+                    buttonTitle: "Удалить",
+                    isDisabled: isCleaningData,
+                    action: clearMetricsHistory
+                )
+                StorageActionPathInfoRow(
+                    title: "Grafana DB",
+                    path: manager.grafanaDatabaseURL.path,
+                    size: byteCountText(for: fileSize(manager.grafanaDatabaseURL)),
+                    buttonTitle: "Удалить",
+                    isDisabled: isCleaningData,
+                    action: clearGrafanaDatabase
+                )
+                StoragePathInfoRow(title: "Metrics history", path: manager.historyMetricsURL.path, size: byteCountText(for: folderSize(manager.historyMetricsURL)))
+                StoragePathInfoRow(title: "Scripts", path: manager.scriptsURL.path, size: byteCountText(for: folderSize(manager.scriptsURL)))
                 StoragePathInfoRow(title: "Workspace", path: manager.workspaceURL.path, size: byteCountText(for: folderSize(manager.workspaceURL)))
                 StoragePathInfoRow(title: "Grafana", path: manager.grafanaURL.path, size: byteCountText(for: folderSize(manager.grafanaURL)))
-                StoragePathInfoRow(title: "Grafana data", path: manager.grafanaDataURL.path, size: byteCountText(for: folderSize(manager.grafanaDataURL)))
                 StoragePathInfoRow(title: "Prometheus", path: manager.prometheusURL.path, size: byteCountText(for: folderSize(manager.prometheusURL)))
-                StoragePathInfoRow(title: "Prometheus data", path: manager.prometheusDataURL.path, size: byteCountText(for: folderSize(manager.prometheusDataURL)))
                 StorageActionPathInfoRow(
                     title: "Updates",
                     path: manager.updatesURL.path,
@@ -694,9 +707,6 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                     isDisabled: isCleaningData,
                     action: clearBackups
                 )
-                StoragePathInfoRow(title: "Скрипты", path: manager.scriptsURL.path, size: byteCountText(for: folderSize(manager.scriptsURL)))
-                StoragePathInfoRow(title: "История", path: manager.historyMetricsURL.path, size: byteCountText(for: folderSize(manager.historyMetricsURL)))
-                StoragePathInfoRow(title: "БД Grafana", path: grafanaDatabaseURL.path, size: byteCountText(for: fileSize(grafanaDatabaseURL)))
             }
         }
     }
@@ -704,26 +714,83 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
     private var cleanupCard: some View {
         AppCard(title: "Очистка") {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Очистка Prometheus удаляет только Contents/Workspace/prometheus/data. Данные мониторинга чистятся отдельно: history pending/imported/failed и state/status.json. Скрипты в Contents/Scripts не трогаем.")
+                Text("Очистка не удаляет данные сразу: опасные папки и файлы переносятся в quarantine внутри Workspace. Перед очисткой Prometheus/Grafana сервисы останавливаются. Contents/Scripts не трогаем.")
                     .foregroundStyle(.secondary)
 
-                HStack(spacing: 12) {
-                    Button {
-                        clearMetricsHistory()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Prometheus DB / TSDB")
+                        .font(.headline)
+                    Text(manager.prometheusDataURL.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            checkPrometheusTSDB()
+                        } label: {
+                            Label("Проверить Prometheus TSDB", systemImage: "stethoscope")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isCleaningData)
+
+                        Button(role: .destructive) {
+                            clearMetricsHistory()
+                        } label: {
+                            Label("Очистить Prometheus TSDB", systemImage: "externaldrive.badge.xmark")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isCleaningData)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Grafana DB")
+                        .font(.headline)
+                    Text(manager.grafanaDatabaseURL.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("Удалит datasource, dashboards, users/settings. Файл будет перенесён в quarantine.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button(role: .destructive) {
+                        clearGrafanaDatabase()
                     } label: {
-                        Label("Очистить историю метрик", systemImage: "clock.arrow.circlepath")
+                        Label("Очистить Grafana DB", systemImage: "cylinder.split.1x2")
                     }
                     .buttonStyle(.bordered)
                     .disabled(isCleaningData)
+                }
 
-                    Button {
+                Divider()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Monitoring history")
+                        .font(.headline)
+                    Text(manager.historyMetricsURL.path)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("Чистит pending/failed/imported и state, но не трогает Prometheus TSDB и Scripts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Button(role: .destructive) {
                         clearMonitoringData()
                     } label: {
-                        Label("Очистить Monitoring data", systemImage: "folder.badge.minus")
+                        Label("Очистить Monitoring history", systemImage: "folder.badge.minus")
                     }
                     .buttonStyle(.bordered)
                     .disabled(isCleaningData)
+                }
 
+                Divider()
+
+                HStack(spacing: 12) {
                     Button(role: .destructive) {
                         showResetConfirmation = true
                     } label: {
@@ -731,6 +798,10 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                     }
                     .buttonStyle(.bordered)
                     .disabled(isCleaningData)
+
+                    Text("Сбросит Prometheus TSDB, Grafana DB и Monitoring history в quarantine. Scripts останутся на месте.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if isCleaningData {
@@ -843,7 +914,7 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
         } catch {
             refreshServiceStatuses()
             appSize = manager.appSizeText()
-            lastActionMessage = "Не удалось запустить Grafana: \(error.localizedDescription)\n\nЕсли это первый запуск или приложение только что собрано, открой раздел “Обновление” и нажми “Обновить компоненты”, чтобы загрузить/обновить Grafana и Prometheus."
+            lastActionMessage = "Не удалось запустить Grafana: \(error.localizedDescription)\n\nЕсли это первый запуск или приложение только что собрано, открой раздел “Инструменты” и нажми “Установить компоненты”, чтобы загрузить и установить Grafana и Prometheus."
             metricsFilePath = manager.metricsFilePath()
         }
     }
@@ -863,7 +934,7 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
 
     private func showCurrentVersions() {
         updateMessage = updateManager.updatePlanText()
-        lastActionMessage = "Текущие версии компонентов обновлены в разделе “Обновление”."
+        lastActionMessage = "Текущие версии компонентов показаны в разделе “Инструменты”."
     }
 
     private func checkUpdates() {
@@ -1099,25 +1170,29 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
         }
 
         isCleaningData = true
-        cleaningStatusMessage = "Очищаю Prometheus DB..."
-        lastActionMessage = "Очищаю внутреннюю историю Prometheus..."
+        cleaningStatusMessage = "Переношу Prometheus TSDB в quarantine..."
+        lastActionMessage = "Останавливаю Prometheus и переношу TSDB в quarantine:\n\(manager.prometheusDataURL.path)"
 
         Task.detached {
             do {
-                try manager.clearPrometheusHistory()
+                try manager.quarantinePrometheusTSDB(
+                    restartPrometheus: true,
+                    retentionDays: selectedRetentionDays,
+                    retentionSizeGb: selectedRetentionSizeGb
+                )
 
                 await MainActor.run {
                     appSize = manager.appSizeText()
                     refreshServiceStatuses()
                     isCleaningData = false
                     cleaningStatusMessage = ""
-                    lastActionMessage = "Внутренняя история Prometheus очищена: Contents/Workspace/prometheus/data пересоздана. Contents/Scripts и Contents/Monitoring не тронуты."
+                    lastActionMessage = "Prometheus TSDB перенесена в quarantine и пересоздана пустой папкой.\n\nПуть TSDB:\n\(manager.prometheusDataURL.path)"
                 }
             } catch {
                 await MainActor.run {
                     isCleaningData = false
                     cleaningStatusMessage = ""
-                    lastActionMessage = "Не удалось очистить историю Prometheus: \(error.localizedDescription)"
+                    lastActionMessage = "Не удалось очистить Prometheus TSDB: \(error.localizedDescription)"
                 }
             }
         }
@@ -1129,12 +1204,12 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
         }
 
         isCleaningData = true
-        cleaningStatusMessage = "Очищаю Monitoring data..."
-        lastActionMessage = "Очищаю history pending/imported/failed и state/status.json..."
+        cleaningStatusMessage = "Переношу Monitoring history в quarantine..."
+        lastActionMessage = "Переношу Monitoring history в quarantine:\n\(manager.historyMetricsURL.path)"
 
         Task.detached {
             do {
-                try manager.clearMonitoringData()
+                try manager.quarantineMonitoringHistory()
 
                 await MainActor.run {
                     metricsFilePath = manager.metricsFilePath()
@@ -1142,16 +1217,53 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
                     refreshServiceStatuses()
                     isCleaningData = false
                     cleaningStatusMessage = ""
-                    lastActionMessage = "Monitoring data очищена: history pending/imported/failed и state/status.json пересозданы. Contents/Scripts не тронуты."
+                    fileListRefreshToken += 1
+                    lastActionMessage = "Monitoring history перенесена в quarantine и пересоздана. Prometheus TSDB и Contents/Scripts не тронуты.\n\nПуть history:\n\(manager.historyMetricsURL.path)"
                 }
             } catch {
                 await MainActor.run {
                     isCleaningData = false
                     cleaningStatusMessage = ""
-                    lastActionMessage = "Не удалось очистить Monitoring data: \(error.localizedDescription)"
+                    lastActionMessage = "Не удалось очистить Monitoring history: \(error.localizedDescription)"
                 }
             }
         }
+    }
+
+    private func clearGrafanaDatabase() {
+        guard !isCleaningData else {
+            return
+        }
+
+        isCleaningData = true
+        cleaningStatusMessage = "Переношу Grafana DB в quarantine..."
+        lastActionMessage = "Останавливаю Grafana и переношу DB в quarantine:\n\(manager.grafanaDatabaseURL.path)"
+
+        Task.detached {
+            do {
+                try manager.quarantineGrafanaDB()
+
+                await MainActor.run {
+                    metricsFilePath = manager.metricsFilePath()
+                    appSize = manager.appSizeText()
+                    refreshServiceStatuses()
+                    refreshGrafanaAutologinCredentials()
+                    isCleaningData = false
+                    cleaningStatusMessage = ""
+                    lastActionMessage = "Grafana DB перенесена в quarantine. При следующем запуске Grafana создаст новую базу.\n\nПуть DB:\n\(manager.grafanaDatabaseURL.path)"
+                }
+            } catch {
+                await MainActor.run {
+                    isCleaningData = false
+                    cleaningStatusMessage = ""
+                    lastActionMessage = "Не удалось очистить Grafana DB: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func checkPrometheusTSDB() {
+        lastActionMessage = manager.prometheusTSDBDiagnosticsText()
     }
 
     private func clearUpdateCache() {
@@ -1228,20 +1340,25 @@ service_up{service=\"Postgres PPA\"} 0 1783073100
         grafanaStatus = .stopped
         prometheusStatus = .stopped
         isCleaningData = true
-        cleaningStatusMessage = "Сбрасываю Contents/Workspace..."
-        lastActionMessage = "Сбрасываю изменяемые данные Contents/Workspace..."
+        cleaningStatusMessage = "Переношу runtime-данные в quarantine..."
+        lastActionMessage = "Останавливаю службы и переношу Prometheus TSDB, Grafana DB и Monitoring history в quarantine. Contents/Scripts не трогаю."
 
         Task.detached {
             do {
-                try manager.resetAllMutableData()
+                try manager.resetRuntimeDataToQuarantine(
+                    retentionDays: selectedRetentionDays,
+                    retentionSizeGb: selectedRetentionSizeGb
+                )
 
                 await MainActor.run {
                     metricsFilePath = manager.metricsFilePath()
                     appSize = manager.appSizeText()
                     refreshServiceStatuses()
+                    refreshGrafanaAutologinCredentials()
                     isCleaningData = false
                     cleaningStatusMessage = ""
-                    lastActionMessage = "Все изменяемые данные Contents/Workspace сброшены. Contents/Scripts и Contents/Monitoring не тронуты."
+                    fileListRefreshToken += 1
+                    lastActionMessage = "Runtime-данные перенесены в quarantine. Contents/Scripts не тронуты.\n\nPrometheus TSDB:\n\(manager.prometheusDataURL.path)\n\nGrafana DB:\n\(manager.grafanaDatabaseURL.path)\n\nMetrics history:\n\(manager.historyMetricsURL.path)"
                 }
             } catch {
                 await MainActor.run {
