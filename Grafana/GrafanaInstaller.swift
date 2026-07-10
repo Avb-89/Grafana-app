@@ -7,7 +7,7 @@
 
 import Foundation
 
-final class UpdateManager {
+final class GrafanaInstaller {
     private let manager: GrafanaManager
     private let fileManager = FileManager.default
 
@@ -350,7 +350,7 @@ final class UpdateManager {
 
         guard process.terminationStatus == 0 else {
             let output = (try? String(contentsOf: updateToolLogURL, encoding: .utf8)) ?? lastProgressText
-            throw UpdateManagerError.toolFailed("/usr/bin/curl", process.terminationStatus, output)
+            throw GrafanaInstallerError.toolFailed("/usr/bin/curl", process.terminationStatus, output)
         }
     }
 
@@ -402,7 +402,7 @@ final class UpdateManager {
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
-            throw UpdateManagerError.directoryEnumerationFailed(rootURL.path)
+            throw GrafanaInstallerError.directoryEnumerationFailed(rootURL.path)
         }
 
         for case let candidateURL as URL in enumerator {
@@ -417,7 +417,7 @@ final class UpdateManager {
             }
         }
 
-        throw UpdateManagerError.markerNotFound(relativePath, rootURL.path)
+        throw GrafanaInstallerError.markerNotFound(relativePath, rootURL.path)
     }
 
     private func replaceDirectory(at destinationURL: URL, with sourceURL: URL, preservingChildren namesToPreserve: [String]) throws {
@@ -460,7 +460,7 @@ final class UpdateManager {
 
     private func makeExecutable(_ url: URL) throws {
         guard fileManager.fileExists(atPath: url.path) else {
-            throw UpdateManagerError.executableNotFound(url.path)
+            throw GrafanaInstallerError.executableNotFound(url.path)
         }
 
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
@@ -475,7 +475,7 @@ final class UpdateManager {
         process.currentDirectoryURL = currentDirectoryURL
 
         guard let logHandle = try? FileHandle(forWritingTo: updateToolLogURL) else {
-            throw UpdateManagerError.logFileOpenFailed(updateToolLogURL.path)
+            throw GrafanaInstallerError.logFileOpenFailed(updateToolLogURL.path)
         }
         try logHandle.seekToEnd()
 
@@ -488,7 +488,7 @@ final class UpdateManager {
 
         guard process.terminationStatus == 0 else {
             let output = (try? String(contentsOf: updateToolLogURL, encoding: .utf8)) ?? ""
-            throw UpdateManagerError.toolFailed(executablePath, process.terminationStatus, output)
+            throw GrafanaInstallerError.toolFailed(executablePath, process.terminationStatus, output)
         }
 
         return (try? String(contentsOf: updateToolLogURL, encoding: .utf8)) ?? ""
@@ -560,7 +560,7 @@ private struct ComponentPackage {
     }
 }
 
-enum UpdateManagerError: LocalizedError {
+enum GrafanaInstallerError: LocalizedError {
     case directoryEnumerationFailed(String)
     case markerNotFound(String, String)
     case executableNotFound(String)
