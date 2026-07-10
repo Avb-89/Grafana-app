@@ -1,5 +1,5 @@
 //
-//  UpdateManager.swift
+//  GrafanaInstaller.swift
 //  Grafana
 //
 //  Created by SITIS on 7/3/26.
@@ -11,7 +11,7 @@ final class GrafanaInstaller {
     private let manager: GrafanaManager
     private let fileManager = FileManager.default
 
-    private let grafanaPackage = ComponentPackage(
+    private let grafanaPackage = GrafanaComponentPackage(
         name: "Grafana Enterprise",
         version: "13.1.0",
         archiveName: "grafana-enterprise_13.1.0_28013217238_darwin_arm64.tar.gz",
@@ -19,7 +19,7 @@ final class GrafanaInstaller {
         markerRelativePath: "bin/grafana"
     )
 
-    private let prometheusPackage = ComponentPackage(
+    private let prometheusPackage = GrafanaComponentPackage(
         name: "Prometheus",
         version: "3.13.0",
         archiveName: "prometheus-3.13.0.darwin-arm64.tar.gz",
@@ -69,8 +69,8 @@ final class GrafanaInstaller {
         }
     }
 
-    func currentVersions() -> ComponentVersions {
-        ComponentVersions(
+    func currentVersions() -> GrafanaComponentVersions {
+        GrafanaComponentVersions(
             grafana: runVersionCommand(executableURL: manager.grafanaBinaryURL),
             prometheus: runVersionCommand(executableURL: manager.prometheusBinaryURL)
         )
@@ -95,7 +95,7 @@ final class GrafanaInstaller {
         """
     }
 
-    func checkUpdatesPlaceholder() throws -> String {
+    func checkInstallerAccess() throws -> String {
         try prepareUpdateWorkspace()
 
         let versions = currentVersions()
@@ -125,7 +125,7 @@ final class GrafanaInstaller {
         """
     }
 
-    func updateComponentsPlaceholder(progress: ((Double, String) -> Void)? = nil) throws -> String {
+    func installComponents(progress: ((Double, String) -> Void)? = nil) throws -> String {
         progress?(0.01, "Готовлю папки обновления...")
         try prepareUpdateWorkspace()
         resetUpdateToolLog()
@@ -256,7 +256,7 @@ final class GrafanaInstaller {
     }
 
     private func downloadArchiveIfNeeded(
-        _ package: ComponentPackage,
+        _ package: GrafanaComponentPackage,
         progress: ((Double, String) -> Void)? = nil,
         progressStartValue: Double,
         progressEndValue: Double,
@@ -287,7 +287,7 @@ final class GrafanaInstaller {
     }
 
     private func runCurlDownload(
-        package: ComponentPackage,
+        package: GrafanaComponentPackage,
         destinationURL: URL,
         progress: ((Double, String) -> Void)?,
         progressStartValue: Double,
@@ -375,7 +375,7 @@ final class GrafanaInstaller {
         return Double(raw)
     }
 
-    private func extractArchive(_ archiveURL: URL, package: ComponentPackage) throws -> URL {
+    private func extractArchive(_ archiveURL: URL, package: GrafanaComponentPackage) throws -> URL {
         appendUpdateToolLog("Extracting \(package.name): \(archiveURL.path)")
         let packageStagingURL = stagingURL.appendingPathComponent(package.safeFolderName, isDirectory: true)
 
@@ -540,12 +540,12 @@ final class GrafanaInstaller {
     }
 }
 
-struct ComponentVersions {
+struct GrafanaComponentVersions {
     let grafana: String?
     let prometheus: String?
 }
 
-private struct ComponentPackage {
+private struct GrafanaComponentPackage {
     let name: String
     let version: String
     let archiveName: String

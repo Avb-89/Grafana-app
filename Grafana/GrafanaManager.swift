@@ -12,7 +12,7 @@ final class GrafanaManager: ObservableObject {
     static let shared = GrafanaManager()
 
     let fileManager = FileManager.default
-    private let processRunner = ProcessRunner()
+    private let processRunner = GrafanaProcessRunner()
     private var metricsImportTimer: DispatchSourceTimer?
     private let metricsImportQueue = DispatchQueue(label: "grafana.metrics.importer", qos: .utility)
     private var metricsImportInProgress = false
@@ -230,14 +230,7 @@ final class GrafanaManager: ObservableObject {
         try ensureGrafanaAdminCredentials()
     }
 
-    func runScript(_ scriptURL: URL) throws -> String {
-        throw NSError(
-            domain: "GrafanaManager",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "runScript устарел. Скрипты запускаются через ScriptScheduler в ContentView."]
-        )
-    }
-    func clearMonitoringData() throws {
+    func clearMonitoringHistory() throws {
         try quarantineMonitoringHistory()
     }
 
@@ -270,7 +263,7 @@ final class GrafanaManager: ObservableObject {
         }
     }
 
-    func clearPrometheusHistory() throws {
+    func clearPrometheusTSDB() throws {
         try quarantinePrometheusTSDB(restartPrometheus: false, retentionDays: 30, retentionSizeGb: 2)
     }
 
@@ -378,7 +371,7 @@ final class GrafanaManager: ObservableObject {
             "cfg:plugins.public_key_retrieval_disabled=true"
         ]
 
-        let config = ManagedProcessLaunchConfig(
+        let config = GrafanaManagedProcessLaunchConfig(
             name: .grafana,
             executableURL: grafanaBinaryURL,
             arguments: arguments,
@@ -404,7 +397,7 @@ final class GrafanaManager: ObservableObject {
             "--web.enable-lifecycle"
         ]
 
-        let config = ManagedProcessLaunchConfig(
+        let config = GrafanaManagedProcessLaunchConfig(
             name: .prometheus,
             executableURL: prometheusBinaryURL,
             arguments: arguments,

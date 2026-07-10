@@ -1,5 +1,5 @@
 //
-//  ProcessRunner.swift
+//  GrafanaProcessRunner.swift
 //  Grafana
 //
 //  Created by SITIS on 7/3/26.
@@ -8,7 +8,7 @@
 import Foundation
 import Darwin
 
-enum ManagedProcessName: String {
+enum GrafanaManagedProcessName: String {
     case grafana
     case prometheus
     case exporter
@@ -25,8 +25,8 @@ enum ManagedProcessName: String {
     }
 }
 
-struct ManagedProcessLaunchConfig {
-    let name: ManagedProcessName
+struct GrafanaManagedProcessLaunchConfig {
+    let name: GrafanaManagedProcessName
     let executableURL: URL
     let arguments: [String]
     let workingDirectoryURL: URL
@@ -34,10 +34,10 @@ struct ManagedProcessLaunchConfig {
     let logFileURL: URL
 }
 
-final class ProcessRunner {
+final class GrafanaProcessRunner {
     private let fileManager = FileManager.default
 
-    func start(_ config: ManagedProcessLaunchConfig) throws -> Int32 {
+    func start(_ config: GrafanaManagedProcessLaunchConfig) throws -> Int32 {
         if let existingPID = readPID(from: config.pidFileURL), isProcessRunning(pid: existingPID) {
             return existingPID
         }
@@ -62,7 +62,7 @@ final class ProcessRunner {
             try process.run()
         } catch {
             try? logHandle.close()
-            throw ProcessRunnerError.couldNotStart(config.name.displayName, error.localizedDescription)
+            throw GrafanaProcessRunnerError.couldNotStart(config.name.displayName, error.localizedDescription)
         }
 
         let pid = process.processIdentifier
@@ -129,11 +129,11 @@ final class ProcessRunner {
 
     private func ensureExecutableExists(_ url: URL) throws {
         guard fileManager.fileExists(atPath: url.path) else {
-            throw ProcessRunnerError.executableNotFound(url.path)
+            throw GrafanaProcessRunnerError.executableNotFound(url.path)
         }
 
         guard fileManager.isExecutableFile(atPath: url.path) else {
-            throw ProcessRunnerError.executableNotRunnable(url.path)
+            throw GrafanaProcessRunnerError.executableNotRunnable(url.path)
         }
     }
 
@@ -146,7 +146,7 @@ final class ProcessRunner {
     }
 }
 
-enum ProcessRunnerError: LocalizedError {
+enum GrafanaProcessRunnerError: LocalizedError {
     case executableNotFound(String)
     case executableNotRunnable(String)
     case couldNotStart(String, String)
