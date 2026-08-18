@@ -53,6 +53,11 @@ struct ContentView: View {
     @State private var selectedScriptPreviewTitle: String = "Просмотр скрипта"
     @State private var grafanaAutologinUsername = "admin"
     @State private var grafanaAutologinPassword = ""
+    @State private var constructorDashboardName = ""
+    @State private var constructorInterval: GrafanaConstructorInterval = .thirtySeconds
+    @State private var constructorHosts: [GrafanaConstructorHost] = [GrafanaConstructorHost()]
+    @State private var generatedPackagePendingDeletion: GrafanaGeneratedPackage?
+    @AppStorage("grafana.autoStartScriptsOnLaunch") private var autoStartScriptsOnLaunch = true
     @State private var appWindowSize = CGSize(width: 1200, height: 760)
 
     private let retentionDaysOptions = [7, 30, 90, 365]
@@ -70,6 +75,28 @@ struct ContentView: View {
     private var currentScriptFiles: [URL] {
         _ = fileListRefreshToken
         return scriptManager.scriptFiles()
+    }
+
+    private var currentGeneratedScriptFiles: [URL] {
+        _ = fileListRefreshToken
+        return scriptManager.generatedScriptFiles()
+    }
+
+    private var currentGeneratedPackages: [GrafanaGeneratedPackage] {
+        _ = fileListRefreshToken
+        return GrafanaConstructorManager.shared.generatedPackages()
+    }
+
+    private var currentGeneratedItems: [GrafanaConstructorGeneratedItem] {
+        currentGeneratedPackages.map { package in
+            GrafanaConstructorGeneratedItem(
+                id: package.dashboardUID,
+                dashboardName: package.dashboardName,
+                packagePath: package.packageURL.path,
+                interval: package.interval,
+                hostCount: package.hostCount
+            )
+        }
     }
 
     var body: some View {
@@ -95,13 +122,36 @@ struct ContentView: View {
         } message: {
             Text("Prometheus TSDB, Grafana DB и Monitoring history будут остановлены и перенесены в quarantine внутри Workspace. Contents/Scripts не трогаются.")
         }
+        .alert(
+            "Удалить сгенерированный мониторинг?",
+            isPresented: Binding(
+                get: { generatedPackagePendingDeletion != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        generatedPackagePendingDeletion = nil
+                    }
+                }
+            )
+        ) {
+            Button("Отмена", role: .cancel) {
+                generatedPackagePendingDeletion = nil
+            }
+
+            Button("Удалить", role: .destructive) {
+                confirmDeleteGeneratedPackage()
+            }
+        } message: {
+            if let package = generatedPackagePendingDeletion {
+                Text("Будут удалены generated-скрипт, его расписание, config.json, dashboard JSON и provisioning-копия Grafana для “\(package.dashboardName)”. Уже импортированные метрики останутся в Prometheus до retention.")
+            }
+        }
         .onAppear {
             prepareWorkspace()
             startAutoRefreshTimer()
         }
         .onDisappear {
             stopAutoRefreshTimer()
-            terminateApplicationFromMainWindow()
+            stopSyntheticUpdateProgress()
         }
         .sheet(isPresented: $showGrafanaWindow) {
             GrafanaWindowView(
@@ -122,6 +172,8 @@ struct ContentView: View {
                 Section("Grafana") {
                     Label(AppSection.overview.title, systemImage: AppSection.overview.systemImage)
                         .tag(AppSection.overview)
+                    Label(AppSection.constructor.title, systemImage: AppSection.constructor.systemImage)
+                        .tag(AppSection.constructor)
                     Label(AppSection.metrics.title, systemImage: AppSection.metrics.systemImage)
                         .tag(AppSection.metrics)
                     Label(AppSection.scripts.title, systemImage: AppSection.scripts.systemImage)
@@ -160,6 +212,8 @@ struct ContentView: View {
                 switch selectedSection {
                 case .overview:
                     overviewPage
+                case .constructor:
+                    constructorPage
                 case .metrics:
                     metricsPage
                 case .scripts:
@@ -179,6 +233,34 @@ struct ContentView: View {
     private var overviewPage: some View {
         GrafanaHeaderCard()
         serviceControlCard
+
+        AppCard(title: "Скрипты") {
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Запускать скрипты при запуске", isOn: $autoStartScriptsOnLaunch)
+                    .toggleStyle(.switch)
+                    .onChange(of: autoStartScriptsOnLaunch) { _, isEnabled in
+                        applyScriptsAutoStartSetting(isEnabled)
+                    }
+
+                Text("По умолчанию включено. ON сразу запускает сохранённые расписания и включает их автозапуск при следующем старте Grafana.app. OFF сразу останавливает расписания и отключает их автозапуск.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var constructorPage: some View {
+        AppCard(title: "Конструктор") {
+            GrafanaCardConstructor(
+                dashboardName: $constructorDashboardName,
+                interval: $constructorInterval,
+                hosts: $constructorHosts,
+                onCreateDashboard: createConstructorDashboard,
+                generatedItems: currentGeneratedItems,
+                onDeleteGeneratedItem: requestDeleteGeneratedItem
+            )
+        }
     }
 
     @ViewBuilder
@@ -226,11 +308,9 @@ struct ContentView: View {
             prometheusStatus: prometheusStatus,
             credentialsStatusText: grafanaCredentialsStatusText(),
             canOpenGrafana: grafanaStatus == .running,
-            canCopyPassword: !grafanaAutologinPassword.isEmpty,
             onStart: startGrafana,
             onStop: stopGrafana,
-            onOpenGrafana: openGrafanaWindow,
-            onCopyPassword: copyGrafanaPassword
+            onOpenGrafana: openGrafanaWindow
         )
     }
 
@@ -249,6 +329,7 @@ struct ContentView: View {
     private var scriptsCard: some View {
         GrafanaCardScripts(
             scriptFiles: currentScriptFiles,
+            generatedScriptFiles: currentGeneratedScriptFiles,
             scriptManager: scriptManager,
             selectedPreviewTitle: selectedScriptPreviewTitle,
             selectedPreviewText: selectedScriptPreview,
@@ -366,6 +447,152 @@ struct ContentView: View {
         )
     }
 
+    private func requestDeleteGeneratedItem(_ item: GrafanaConstructorGeneratedItem) {
+        generatedPackagePendingDeletion = currentGeneratedPackages.first {
+            $0.dashboardUID == item.id
+        }
+    }
+
+    private func confirmDeleteGeneratedPackage() {
+        guard let package = generatedPackagePendingDeletion else {
+            return
+        }
+
+        generatedPackagePendingDeletion = nil
+        scriptManager.stopScriptAndSchedule(package.scriptURL)
+        lastActionMessage = "Удаляю сгенерированный мониторинг “\(package.dashboardName)” из Grafana и локального Generated-пакета..."
+
+        Task {
+            do {
+                try await manager.deleteGeneratedDashboardInGrafana(
+                    dashboardUID: package.dashboardUID
+                )
+
+                try GrafanaConstructorManager.shared.deleteGeneratedPackage(package)
+
+                await MainActor.run {
+                    refreshDiskSizes()
+                    fileListRefreshToken += 1
+                    lastActionMessage = """
+                    Сгенерированный мониторинг “\(package.dashboardName)” удалён.
+
+                    Удалены:
+                    • dashboard из Grafana
+                    • generated-скрипт
+                    • расписание
+                    • config.json
+                    • dashboard JSON
+                    • provisioning-копия Grafana
+
+                    Исторические метрики останутся в Prometheus до retention.
+                    """
+                }
+            } catch {
+                await MainActor.run {
+                    refreshDiskSizes()
+                    fileListRefreshToken += 1
+                    lastActionMessage = """
+                    Не удалось полностью удалить “\(package.dashboardName)”.
+
+                    Ошибка:
+                    \(error.localizedDescription)
+
+                    Локальный Generated-пакет сохранён, чтобы не потерять связь с dashboard в Grafana.
+                    """
+                }
+            }
+        }
+    }
+
+    private func createConstructorDashboard() {
+        let dashboardName = constructorDashboardName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let configuredHosts = constructorHosts.filter {
+            !$0.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.probes.isEmpty
+        }
+
+        guard !dashboardName.isEmpty, !configuredHosts.isEmpty else {
+            lastActionMessage = "Конструктор: укажи название дашборда и хотя бы один адрес узла с выбранной проверкой."
+            return
+        }
+
+        do {
+            let result = try GrafanaConstructorManager.shared.generatePackage(
+                dashboardName: dashboardName,
+                interval: constructorInterval,
+                hosts: configuredHosts
+            )
+
+            scriptManager.updateScheduleText(constructorInterval.rawValue, for: result.scriptURL)
+            scriptManager.runScript(result.scriptURL)
+            _ = scriptManager.startSchedule(for: result.scriptURL)
+
+            lastActionMessage = """
+            Пакет мониторинга “\(dashboardName)” создан.
+
+            Скрипт запущен, расписание включено.
+            Подключаю Prometheus datasource и импортирую dashboard в Grafana...
+            """
+
+            Task {
+                do {
+                    let installedDashboardURL = try await manager.installGeneratedDashboardInGrafana(
+                        from: result.dashboardURL,
+                        dashboardUID: result.dashboardUID
+                    )
+
+                    await MainActor.run {
+                        refreshDiskSizes()
+                        refreshFileLists()
+
+                        lastActionMessage = """
+                        Конструктор создал мониторинг “\(dashboardName)”.
+
+                        Папка пакета:
+                        \(result.directoryURL.path)
+
+                        Скрипт:
+                        \(result.scriptURL.lastPathComponent)
+
+                        Конфигурация:
+                        \(result.configURL.lastPathComponent)
+
+                        Dashboard JSON:
+                        \(result.dashboardURL.lastPathComponent)
+
+                        Provisioning-копия:
+                        \(installedDashboardURL.path)
+
+                        UID: \(result.dashboardUID)
+                        Интервал сбора: \(constructorInterval.title)
+
+                        Prometheus datasource проверен/создан через Grafana API.
+                        Dashboard импортирован через Grafana API.
+                        Generated-скрипт работает по расписанию.
+                        """
+                    }
+                } catch {
+                    await MainActor.run {
+                        refreshDiskSizes()
+                        refreshFileLists()
+                        lastActionMessage = """
+                        Пакет мониторинга “\(dashboardName)” создан, скрипт и расписание запущены, но Grafana API не завершил настройку.
+
+                        Ошибка:
+                        \(error.localizedDescription)
+
+                        Dashboard JSON:
+                        \(result.dashboardURL.path)
+
+                        UID: \(result.dashboardUID)
+                        """
+                    }
+                }
+            }
+        } catch {
+            lastActionMessage = "Конструктор: не удалось создать пакет мониторинга — \(error.localizedDescription)"
+        }
+    }
+
     private func clearMetricsPreview() {
         selectedMetricsPreview = "Выбери history-файл, чтобы посмотреть его содержимое."
         selectedMetricsPreviewTitle = "Просмотр history"
@@ -410,7 +637,6 @@ struct ContentView: View {
     private func startAutoRefreshTimer() {
         stopAutoRefreshTimer()
         autoRefreshTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { _ in
-            fileListRefreshToken += 1
             refreshPrometheusTSDBSize()
         }
     }
@@ -441,11 +667,21 @@ struct ContentView: View {
         "Grafana login: \(grafanaAutologinUsername)\nGrafana password: сгенерирован, нажми “Скопировать пароль”\nCredentials file: \(manager.grafanaAdminCredentialsURL.path)"
     }
 
-    private func copyGrafanaPassword() {
-        refreshGrafanaAutologinCredentials()
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(grafanaAutologinPassword, forType: .string)
-        lastActionMessage = "Пароль Grafana скопирован в буфер обмена.\n\n\(grafanaCredentialsStatusText())"
+
+    private func applyScriptsAutoStartSetting(_ isEnabled: Bool) {
+        if isEnabled {
+            let allScriptFiles = currentScriptFiles + currentGeneratedScriptFiles
+            scriptManager.startAllStoredSchedules(scriptFiles: allScriptFiles)
+
+            if scriptManager.hasSchedules {
+                lastActionMessage = "Автозапуск скриптов включён. Сохранённые расписания запущены."
+            } else {
+                lastActionMessage = "Автозапуск скриптов включён. Сохранённых расписаний пока нет."
+            }
+        } else {
+            scriptManager.cancelAllSchedules()
+            lastActionMessage = "Автозапуск скриптов отключён. Все активные расписания остановлены. Уже выполняющийся одиночный запуск скрипта не прерывается."
+        }
     }
 
     private func grafanaWindowSize() -> CGSize {
@@ -466,9 +702,15 @@ struct ContentView: View {
             updateMessage = "Компоненты Grafana и Prometheus управляются через раздел “Инструменты”."
             fileListRefreshToken += 1
 
-            scriptManager.startAllStoredSchedules(scriptFiles: scriptManager.scriptFiles())
-            if scriptManager.hasSchedules {
-                lastActionMessage += "\n\nРасписания скриптов запущены автоматически."
+            if autoStartScriptsOnLaunch {
+                scriptManager.startAllStoredSchedules(
+                    scriptFiles: scriptManager.scriptFiles() + scriptManager.generatedScriptFiles()
+                )
+                if scriptManager.hasSchedules {
+                    lastActionMessage += "\n\nРасписания скриптов запущены автоматически."
+                }
+            } else {
+                lastActionMessage += "\n\nАвтозапуск скриптов отключён в настройке на Главной."
             }
         } catch {
             grafanaStatus = .warning
@@ -477,11 +719,6 @@ struct ContentView: View {
         }
     }
 
-    private func terminateApplicationFromMainWindow() {
-        stopSyntheticUpdateProgress()
-        try? manager.stopAll()
-        NSApplication.shared.terminate(nil)
-    }
 
     private func startGrafana() {
         do {
@@ -552,13 +789,15 @@ struct ContentView: View {
                 }
 
                 DispatchQueue.main.async {
-                    self.isUpdatingComponents = false
-                    self.finishSyntheticUpdateProgress()
                     self.updateMessage = "Компоненты Grafana и Prometheus управляются через раздел “Инструменты”."
-                    self.updateProgressMessage = "Готово."
+                    self.updateProgressMessage = "Завершаю установку компонентов..."
                     self.refreshServiceStatuses()
                     self.refreshDiskSizes()
                     self.lastActionMessage = "Компоненты установлены. Теперь можно нажать “Запустить Grafana”."
+                    self.finishSyntheticUpdateProgress {
+                        self.updateProgressMessage = "Готово."
+                        self.isUpdatingComponents = false
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -605,7 +844,7 @@ struct ContentView: View {
         }
     }
 
-    private func finishSyntheticUpdateProgress() {
+    private func finishSyntheticUpdateProgress(completion: @escaping () -> Void) {
         updateProgressTimer?.invalidate()
         updateProgressTimer = nil
         updateProgressStartedAt = nil
@@ -622,6 +861,7 @@ struct ContentView: View {
                 updateProgressTimer?.invalidate()
                 updateProgressTimer = nil
                 updateProgress = 1.0
+                completion()
             }
         }
     }
@@ -763,8 +1003,9 @@ struct ContentView: View {
     }
 
     private func startAllScriptSchedules() {
-        scriptManager.startAllStoredSchedules(scriptFiles: currentScriptFiles)
-        lastActionMessage = "Расписания всех скриптов с заполненным интервалом запущены."
+        let allScriptFiles = currentScriptFiles + currentGeneratedScriptFiles
+        scriptManager.startAllStoredSchedules(scriptFiles: allScriptFiles)
+        lastActionMessage = "Расписания всех пользовательских и сгенерированных скриптов с заполненным интервалом запущены."
     }
 
     private func cancelAllScriptSchedules() {

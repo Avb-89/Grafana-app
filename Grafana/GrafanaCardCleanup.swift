@@ -5,14 +5,6 @@
 //  Created by SITIS on 7/10/26.
 //
 
-
-//
-//  GrafanaCardCleanup.swift
-//  Grafana
-//
-//  Created by SITIS on 7/10/26.
-//
-
 import SwiftUI
 
 struct GrafanaCardCleanup: View {

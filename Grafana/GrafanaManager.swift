@@ -100,6 +100,26 @@ final class GrafanaManager: ObservableObject {
         grafanaURL.appendingPathComponent("provisioning", isDirectory: true)
     }
 
+    var grafanaDashboardsProvisioningURL: URL {
+        grafanaProvisioningURL.appendingPathComponent("dashboards", isDirectory: true)
+    }
+
+    var grafanaDatasourcesProvisioningURL: URL {
+        grafanaProvisioningURL.appendingPathComponent("datasources", isDirectory: true)
+    }
+
+    var grafanaPrometheusDatasourceProvisioningConfigURL: URL {
+        grafanaDatasourcesProvisioningURL.appendingPathComponent("grafana-app-prometheus.yaml")
+    }
+
+    var grafanaGeneratedDashboardsURL: URL {
+        workspaceURL.appendingPathComponent("generated-dashboards", isDirectory: true)
+    }
+
+    var grafanaGeneratedDashboardsProvisioningConfigURL: URL {
+        grafanaDashboardsProvisioningURL.appendingPathComponent("grafana-app-generated.yaml")
+    }
+
     var prometheusURL: URL {
         workspaceURL.appendingPathComponent("prometheus", isDirectory: true)
     }
@@ -173,6 +193,9 @@ final class GrafanaManager: ObservableObject {
             grafanaLogsURL,
             grafanaPluginsURL,
             grafanaProvisioningURL,
+            grafanaDashboardsProvisioningURL,
+            grafanaDatasourcesProvisioningURL,
+            grafanaGeneratedDashboardsURL,
             prometheusDataURL,
             logsURL,
             updatesURL,
@@ -201,6 +224,8 @@ final class GrafanaManager: ObservableObject {
             try "[]".write(to: importedMetricsRegistryURL, atomically: true, encoding: .utf8)
         }
 
+        try ensureGeneratedDashboardsProvisioningConfig()
+        try ensurePrometheusDatasourceProvisioningConfig()
         _ = try ensureGrafanaAdminCredentials()
     }
 
@@ -229,6 +254,300 @@ final class GrafanaManager: ObservableObject {
     func grafanaAdminCredentials() throws -> GrafanaAdminCredentials {
         try ensureGrafanaAdminCredentials()
     }
+
+    // MARK: - Dashboard/API install
+    public func installGeneratedDashboardInGrafana(
+        from sourceURL: URL,
+        dashboardUID: String
+    ) async throws -> URL {
+        let provisioningURL = try installGeneratedDashboard(
+            from: sourceURL,
+            dashboardUID: dashboardUID
+        )
+
+        let credentials = try ensureGrafanaAdminCredentials()
+        try await ensurePrometheusDatasourceViaAPI(credentials: credentials)
+        try await importDashboardViaAPI(from: sourceURL, credentials: credentials)
+
+        return provisioningURL
+    }
+
+    public func deleteGeneratedDashboardInGrafana(dashboardUID: String) async throws {
+        let credentials = try ensureGrafanaAdminCredentials()
+
+        guard let encodedUID = dashboardUID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "http://127.0.0.1:3000/api/dashboards/uid/\(encodedUID)") else {
+            throw NSError(
+                domain: "GrafanaManager.DashboardDeleteAPI",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Не удалось сформировать URL для удаления dashboard UID: \(dashboardUID)"]
+            )
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyGrafanaBasicAuth(to: &request, credentials: credentials)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(
+                domain: "GrafanaManager.DashboardDeleteAPI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Grafana не вернула HTTP-ответ при удалении dashboard."]
+            )
+        }
+
+        if httpResponse.statusCode == 404 {
+            return
+        }
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "GrafanaManager.DashboardDeleteAPI",
+                code: httpResponse.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Grafana не удалила dashboard. HTTP \(httpResponse.statusCode). \(message)"]
+            )
+        }
+    }
+
+    func installGeneratedDashboard(from sourceURL: URL, dashboardUID: String) throws -> URL {
+        try prepareWorkspace()
+
+        guard fileManager.fileExists(atPath: sourceURL.path) else {
+            throw NSError(
+                domain: "GrafanaManager.GeneratedDashboard",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Dashboard JSON не найден: \(sourceURL.path)"]
+            )
+        }
+
+        let safeUID = dashboardUID
+            .lowercased()
+            .map { character -> Character in
+                character.isLetter || character.isNumber || character == "-" || character == "_" ? character : "-"
+            }
+        let fileName = String(safeUID).isEmpty ? "generated-dashboard.json" : "\(String(safeUID)).json"
+        let destinationURL = grafanaGeneratedDashboardsURL.appendingPathComponent(fileName)
+
+        if fileManager.fileExists(atPath: destinationURL.path) {
+            try fileManager.removeItem(at: destinationURL)
+        }
+
+        try fileManager.copyItem(at: sourceURL, to: destinationURL)
+        reloadGrafanaProvisioningIfRunning()
+        return destinationURL
+    }
+
+    // MARK: - API helpers
+    private func ensurePrometheusDatasourceViaAPI(credentials: GrafanaAdminCredentials) async throws {
+        let lookupURL = URL(string: "http://127.0.0.1:3000/api/datasources/uid/prometheus")!
+        var lookupRequest = URLRequest(url: lookupURL)
+        lookupRequest.httpMethod = "GET"
+        applyGrafanaBasicAuth(to: &lookupRequest, credentials: credentials)
+
+        let (_, lookupResponse) = try await URLSession.shared.data(for: lookupRequest)
+        if let httpResponse = lookupResponse as? HTTPURLResponse,
+           (200...299).contains(httpResponse.statusCode) {
+            return
+        }
+
+        let createURL = URL(string: "http://127.0.0.1:3000/api/datasources")!
+        var createRequest = URLRequest(url: createURL)
+        createRequest.httpMethod = "POST"
+        createRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        createRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyGrafanaBasicAuth(to: &createRequest, credentials: credentials)
+
+        let body: [String: Any] = [
+            "name": "Prometheus",
+            "uid": "prometheus",
+            "type": "prometheus",
+            "access": "proxy",
+            "url": "http://127.0.0.1:9090",
+            "isDefault": true,
+            "editable": true,
+            "jsonData": [
+                "httpMethod": "POST",
+                "timeInterval": "10s"
+            ]
+        ]
+        createRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: createRequest)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "GrafanaManager.DataSourceAPI",
+                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                userInfo: [NSLocalizedDescriptionKey: "Grafana не создала Prometheus datasource. \(message)"]
+            )
+        }
+    }
+
+    private func importDashboardViaAPI(
+        from sourceURL: URL,
+        credentials: GrafanaAdminCredentials
+    ) async throws {
+        let dashboardData = try Data(contentsOf: sourceURL)
+        guard let dashboardObject = try JSONSerialization.jsonObject(with: dashboardData) as? [String: Any] else {
+            throw NSError(
+                domain: "GrafanaManager.DashboardAPI",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Generated dashboard JSON имеет неверный формат."]
+            )
+        }
+
+        let apiURL = URL(string: "http://127.0.0.1:3000/api/dashboards/db")!
+        var request = URLRequest(url: apiURL)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        applyGrafanaBasicAuth(to: &request, credentials: credentials)
+
+        let body: [String: Any] = [
+            "dashboard": dashboardObject,
+            "folderUid": "",
+            "overwrite": true,
+            "message": "Generated by Grafana.app Constructor"
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(
+                domain: "GrafanaManager.DashboardAPI",
+                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                userInfo: [NSLocalizedDescriptionKey: "Grafana не импортировала dashboard. \(message)"]
+            )
+        }
+    }
+
+    private func applyGrafanaBasicAuth(
+        to request: inout URLRequest,
+        credentials: GrafanaAdminCredentials
+    ) {
+        let authValue = Data("\(credentials.username):\(credentials.password)".utf8).base64EncodedString()
+        request.setValue("Basic \(authValue)", forHTTPHeaderField: "Authorization")
+    }
+
+    // MARK: - File provisioning (legacy, used as backup)
+    private func ensurePrometheusDatasourceProvisioningConfig() throws {
+        try fileManager.createDirectory(at: grafanaDatasourcesProvisioningURL, withIntermediateDirectories: true)
+
+        let config = """
+        apiVersion: 1
+        prune: true
+
+        datasources:
+          - name: Prometheus
+            uid: prometheus
+            type: prometheus
+            access: proxy
+            url: http://127.0.0.1:9090
+            isDefault: true
+            editable: true
+            jsonData:
+              httpMethod: POST
+              timeInterval: 10s
+        """
+
+        let current = try? String(contentsOf: grafanaPrometheusDatasourceProvisioningConfigURL, encoding: .utf8)
+        guard current != config else {
+            return
+        }
+
+        try config.write(
+            to: grafanaPrometheusDatasourceProvisioningConfigURL,
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+    private func ensureGeneratedDashboardsProvisioningConfig() throws {
+        try fileManager.createDirectory(at: grafanaDashboardsProvisioningURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: grafanaGeneratedDashboardsURL, withIntermediateDirectories: true)
+
+        let config = """
+        apiVersion: 1
+
+        providers:
+          - name: Grafana.app Generated
+            orgId: 1
+            folder: Grafana.app Generated
+            type: file
+            disableDeletion: false
+            allowUiUpdates: true
+            updateIntervalSeconds: 10
+            options:
+              path: \(grafanaGeneratedDashboardsURL.path)
+        """
+
+        let current = try? String(contentsOf: grafanaGeneratedDashboardsProvisioningConfigURL, encoding: .utf8)
+        guard current != config else {
+            return
+        }
+
+        try config.write(
+            to: grafanaGeneratedDashboardsProvisioningConfigURL,
+            atomically: true,
+            encoding: .utf8
+        )
+    }
+
+    private func reloadGrafanaProvisioningIfRunning() {
+        guard pidListening(onTCPPort: 3000) != nil else {
+            return
+        }
+
+        guard let credentials = try? ensureGrafanaAdminCredentials() else {
+            return
+        }
+
+        reloadGrafanaProvisioning(
+            type: "datasources",
+            username: credentials.username,
+            password: credentials.password
+        )
+
+        reloadGrafanaProvisioning(
+            type: "dashboards",
+            username: credentials.username,
+            password: credentials.password
+        )
+    }
+
+    private func reloadGrafanaProvisioning(type: String, username: String, password: String) {
+        guard let url = URL(string: "http://127.0.0.1:3000/api/admin/provisioning/\(type)/reload") else {
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        applyGrafanaBasicAuth(
+            to: &request,
+            credentials: GrafanaAdminCredentials(username: username, password: password)
+        )
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error {
+                print("Grafana provisioning reload \(type) failed: \(error.localizedDescription)")
+                return
+            }
+
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200...299).contains(httpResponse.statusCode) {
+                print("Grafana provisioning reload \(type) returned HTTP \(httpResponse.statusCode)")
+            }
+        }.resume()
+    }
+
 
     func clearMonitoringHistory() throws {
         try quarantineMonitoringHistory()

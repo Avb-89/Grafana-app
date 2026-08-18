@@ -9,6 +9,7 @@ import SwiftUI
 
 struct GrafanaCardScripts: View {
     let scriptFiles: [URL]
+    let generatedScriptFiles: [URL]
     @ObservedObject var scriptManager: GrafanaScriptManager
 
     let selectedPreviewTitle: String
@@ -34,11 +35,16 @@ struct GrafanaCardScripts: View {
                 toolbar
 
                 if scriptFiles.isEmpty {
-                    Text("Скрипты пока не найдены. Импортируй .sh, .zsh или .command файл.")
+                    Text("Пользовательские скрипты пока не найдены. Импортируй .sh, .zsh или .command файл.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    scriptsList
+                    userScriptsList
+                }
+
+                if !generatedScriptFiles.isEmpty {
+                    Divider()
+                    generatedScriptsList
                 }
 
                 Divider()
@@ -90,7 +96,7 @@ struct GrafanaCardScripts: View {
                 Label("Запустить расписания", systemImage: "timer")
             }
             .buttonStyle(.borderedProminent)
-            .disabled(scriptFiles.isEmpty)
+            .disabled(scriptFiles.isEmpty && generatedScriptFiles.isEmpty)
 
             Button {
                 onCancelAllSchedules()
@@ -102,18 +108,41 @@ struct GrafanaCardScripts: View {
         }
     }
 
-    private var scriptsList: some View {
+    private var userScriptsList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Файлы скриптов")
+            Text("Мои скрипты")
                 .font(.headline)
 
             ForEach(scriptFiles, id: \.path) { file in
-                scriptRow(file)
+                scriptRow(file, generated: false)
             }
         }
     }
 
-    private func scriptRow(_ file: URL) -> some View {
+    private var generatedScriptsList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Сгенерировано Конструктором")
+                    .font(.headline)
+
+                Spacer()
+
+                Text("\(generatedScriptFiles.count)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Эти скрипты созданы автоматически. Их исходники лежат внутри Scripts/Generated рядом с config.json и dashboard JSON.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ForEach(generatedScriptFiles, id: \.path) { file in
+                scriptRow(file, generated: true)
+            }
+        }
+    }
+
+    private func scriptRow(_ file: URL, generated: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: scriptManager.isRunning(file) ? "terminal.fill" : "terminal")
@@ -121,9 +150,20 @@ struct GrafanaCardScripts: View {
                     .frame(width: 22)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(file.lastPathComponent)
-                        .font(.headline)
-                        .lineLimit(1)
+                    HStack(spacing: 8) {
+                        Text(file.lastPathComponent)
+                            .font(.headline)
+                            .lineLimit(1)
+
+                        if generated {
+                            Text("GEN")
+                                .font(.caption2.weight(.bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.quaternary)
+                                .clipShape(Capsule())
+                        }
+                    }
 
                     Text(scriptManager.state(for: file))
                         .font(.caption)

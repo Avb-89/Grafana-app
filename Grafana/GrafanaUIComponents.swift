@@ -10,6 +10,7 @@ import SwiftUI
 
 enum AppSection: Hashable {
     case overview
+    case constructor
     case metrics
     case scripts
     case cleanup
@@ -19,6 +20,8 @@ enum AppSection: Hashable {
         switch self {
         case .overview:
             return "Главная"
+        case .constructor:
+            return "Конструктор"
         case .metrics:
             return "Метрики"
         case .scripts:
@@ -34,6 +37,8 @@ enum AppSection: Hashable {
         switch self {
         case .overview:
             return "gauge.with.dots.needle.67percent"
+        case .constructor:
+            return "wand.and.stars"
         case .metrics:
             return "chart.xyaxis.line"
         case .scripts:

@@ -12,12 +12,10 @@ struct GrafanaCardServiceControl: View {
     let prometheusStatus: ServiceStatus
     let credentialsStatusText: String
     let canOpenGrafana: Bool
-    let canCopyPassword: Bool
 
     let onStart: () -> Void
     let onStop: () -> Void
     let onOpenGrafana: () -> Void
-    let onCopyPassword: () -> Void
 
     var body: some View {
         AppCard(title: "Запуск") {
@@ -48,13 +46,6 @@ struct GrafanaCardServiceControl: View {
                     .buttonStyle(.bordered)
                     .disabled(!canOpenGrafana)
 
-                    Button {
-                        onCopyPassword()
-                    } label: {
-                        Label("Скопировать пароль", systemImage: "key.fill")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!canCopyPassword)
                 }
 
                 HStack(spacing: 18) {

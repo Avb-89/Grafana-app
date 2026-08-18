@@ -32,6 +32,7 @@ final class GrafanaScriptManager: ObservableObject {
     private let fileManager: FileManager
     private var scheduleTasks: [String: Task<Void, Never>] = [:]
     private var runningProcesses: [String: Process] = [:]
+    private var userStoppedScriptPaths: Set<String> = []
     private var scheduleTextStorage: [String: String] = [:]
     private let scheduleTextsDefaultsKey = "grafana.script.schedule.texts.v1"
 
@@ -63,6 +64,30 @@ final class GrafanaScriptManager: ObservableObject {
         return contents
             .filter { isImportableScript($0) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    func generatedScriptFiles() -> [URL] {
+        let generatedURL = manager.scriptsURL.appendingPathComponent("Generated", isDirectory: true)
+
+        guard let enumerator = fileManager.enumerator(
+            at: generatedURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return enumerator
+            .compactMap { $0 as? URL }
+            .filter { isImportableScript($0) }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    func isGeneratedScript(_ url: URL) -> Bool {
+        let generatedURL = manager.scriptsURL.appendingPathComponent("Generated", isDirectory: true)
+        let generatedPath = generatedURL.standardizedFileURL.path
+        let scriptPath = url.standardizedFileURL.path
+        return scriptPath == generatedPath || scriptPath.hasPrefix(generatedPath + "/")
     }
 
     func previewText(for url: URL) throws -> String {
@@ -152,6 +177,7 @@ final class GrafanaScriptManager: ObservableObject {
             return
         }
 
+        userStoppedScriptPaths.remove(url.path)
         runningScriptPaths.insert(url.path)
         scriptStates[url.path] = "Выполняется"
         lastRunTitle = "Выполняется: \(url.lastPathComponent)"
@@ -165,17 +191,28 @@ final class GrafanaScriptManager: ObservableObject {
             await MainActor.run {
                 self.runningScriptPaths.remove(url.path)
                 self.runningProcesses[url.path] = nil
-                self.scriptStates[url.path] = result.success ? "Готов" : "Ошибка"
-                self.lastRunTitle = result.success ? "Готово: \(url.lastPathComponent)" : "Ошибка: \(url.lastPathComponent)"
-                self.lastRunOutput = result.output
+
+                if self.userStoppedScriptPaths.remove(url.path) != nil {
+                    self.scriptStates[url.path] = "Остановлен"
+                    self.lastRunTitle = "Остановлен: \(url.lastPathComponent)"
+                    self.lastRunOutput = "Скрипт остановлен пользователем."
+                } else {
+                    self.scriptStates[url.path] = result.success ? "Готов" : "Ошибка"
+                    self.lastRunTitle = result.success ? "Готово: \(url.lastPathComponent)" : "Ошибка: \(url.lastPathComponent)"
+                    self.lastRunOutput = result.output
+                }
             }
         }
     }
 
     func stopScript(_ url: URL) {
+        userStoppedScriptPaths.insert(url.path)
+
         guard let process = runningProcesses[url.path] else {
             runningScriptPaths.remove(url.path)
             scriptStates[url.path] = "Остановлен"
+            lastRunTitle = "Остановлен: \(url.lastPathComponent)"
+            lastRunOutput = "Скрипт остановлен пользователем."
             return
         }
 
@@ -386,9 +423,15 @@ final class GrafanaScriptManager: ObservableObject {
     }
 
     private func scheduleScript(_ url: URL, intervalText: String, interval: TimeInterval) {
-        let nextRun = Date().addingTimeInterval(interval)
-        schedules[url.path] = GrafanaScriptScheduleState(intervalText: intervalText, isActive: true, nextRunDate: nextRun)
+        schedules[url.path] = GrafanaScriptScheduleState(
+            intervalText: intervalText,
+            isActive: true,
+            nextRunDate: Date()
+        )
         scriptStates[url.path] = "Расписание активно"
+
+        runScript(url)
+        schedules[url.path]?.nextRunDate = Date().addingTimeInterval(interval)
 
         let task = Task { [weak self] in
             guard let self else { return }
