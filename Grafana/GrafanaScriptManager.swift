@@ -50,8 +50,6 @@ final class GrafanaScriptManager: ObservableObject {
         !schedules.isEmpty
     }
 
-    // MARK: - Script files
-
     func scriptFiles() -> [URL] {
         guard let contents = try? fileManager.contentsOfDirectory(
             at: manager.scriptsURL,
@@ -148,8 +146,6 @@ final class GrafanaScriptManager: ObservableObject {
         return importedCount
     }
 
-    // MARK: - Script running
-
     func isRunning(_ url: URL) -> Bool {
         runningScriptPaths.contains(url.path)
     }
@@ -177,6 +173,8 @@ final class GrafanaScriptManager: ObservableObject {
             return
         }
 
+        let startedAt = Date()
+
         userStoppedScriptPaths.remove(url.path)
         runningScriptPaths.insert(url.path)
         scriptStates[url.path] = "Выполняется"
@@ -191,6 +189,32 @@ final class GrafanaScriptManager: ObservableObject {
             await MainActor.run {
                 self.runningScriptPaths.remove(url.path)
                 self.runningProcesses[url.path] = nil
+
+                let finishedAt = Date()
+                let duration = finishedAt.timeIntervalSince(startedAt)
+
+                if self.isGeneratedScript(url),
+                   let monitoringTask = GrafanaTaskManager.shared.tasks.first(where: { $0.scriptPath == url.path }) {
+                    if result.success {
+                        GrafanaTaskManager.shared.updateRuntime(
+                            dashboardUID: monitoringTask.dashboardUID,
+                            state: .running,
+                            activity: "Сбор метрик работает по расписанию",
+                            lastSuccessfulCollection: finishedAt,
+                            lastCollectionDuration: duration,
+                            nextCollectionDate: self.schedules[url.path]?.nextRunDate,
+                            lastError: nil
+                        )
+                    } else if self.userStoppedScriptPaths.contains(url.path) == false {
+                        GrafanaTaskManager.shared.updateRuntime(
+                            dashboardUID: monitoringTask.dashboardUID,
+                            state: .error,
+                            activity: "Последний сбор завершился с ошибкой",
+                            nextCollectionDate: self.schedules[url.path]?.nextRunDate,
+                            lastError: result.output
+                        )
+                    }
+                }
 
                 if self.userStoppedScriptPaths.remove(url.path) != nil {
                     self.scriptStates[url.path] = "Остановлен"
@@ -229,8 +253,6 @@ final class GrafanaScriptManager: ObservableObject {
         cancelSchedule(for: url)
     }
 
-    // MARK: - Script schedules
-
     func startSchedule(for url: URL) -> GrafanaScriptScheduleStartResult {
         guard scheduleTasks[url.path] == nil else {
             return .alreadyActive
@@ -265,21 +287,25 @@ final class GrafanaScriptManager: ObservableObject {
     }
 
     func cancelAllSchedules() {
-        for task in scheduleTasks.values {
-            task.cancel()
+        let generatedURL = manager.scriptsURL
+            .appendingPathComponent("Generated", isDirectory: true)
+            .standardizedFileURL
+        let generatedPath = generatedURL.path + "/"
+
+        let userSchedulePaths = scheduleTasks.keys.filter { path in
+            !URL(fileURLWithPath: path).standardizedFileURL.path.hasPrefix(generatedPath)
         }
 
-        scheduleTasks.removeAll()
-        schedules.removeAll()
+        for path in userSchedulePaths {
+            scheduleTasks[path]?.cancel()
+            scheduleTasks[path] = nil
+            schedules[path] = nil
 
-        for path in scriptStates.keys {
             if !runningScriptPaths.contains(path) {
                 scriptStates[path] = "Расписание остановлено"
             }
         }
     }
-
-    // MARK: - Private script files
 
     private func scriptImportCandidates(in directoryURL: URL) throws -> [URL] {
         guard let enumerator = fileManager.enumerator(
@@ -364,8 +390,6 @@ final class GrafanaScriptManager: ObservableObject {
         }
     }
 
-    // MARK: - Private script running
-
     private nonisolated func executeScript(_ url: URL) async -> (success: Bool, output: String) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -433,6 +457,16 @@ final class GrafanaScriptManager: ObservableObject {
         runScript(url)
         schedules[url.path]?.nextRunDate = Date().addingTimeInterval(interval)
 
+        if isGeneratedScript(url),
+           let monitoringTask = GrafanaTaskManager.shared.tasks.first(where: { $0.scriptPath == url.path }) {
+            GrafanaTaskManager.shared.updateRuntime(
+                dashboardUID: monitoringTask.dashboardUID,
+                state: .running,
+                activity: "Сбор метрик работает по расписанию",
+                nextCollectionDate: schedules[url.path]?.nextRunDate
+            )
+        }
+
         let task = Task { [weak self] in
             guard let self else { return }
 
@@ -443,6 +477,16 @@ final class GrafanaScriptManager: ObservableObject {
                 await MainActor.run {
                     self.runScript(url)
                     self.schedules[url.path]?.nextRunDate = Date().addingTimeInterval(interval)
+
+                    if self.isGeneratedScript(url),
+                       let monitoringTask = GrafanaTaskManager.shared.tasks.first(where: { $0.scriptPath == url.path }) {
+                        GrafanaTaskManager.shared.updateRuntime(
+                            dashboardUID: monitoringTask.dashboardUID,
+                            state: .running,
+                            activity: "Сбор метрик работает по расписанию",
+                            nextCollectionDate: self.schedules[url.path]?.nextRunDate
+                        )
+                    }
                 }
             }
         }

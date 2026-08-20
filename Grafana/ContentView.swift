@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var manager = GrafanaManager.shared
     @StateObject private var scriptManager = GrafanaScriptManager(manager: GrafanaManager.shared)
+    @StateObject private var taskManager = GrafanaTaskManager.shared
     private let installer = GrafanaInstaller()
     private let grafanaMetrics = GrafanaMetrics()
     private let diskManager = GrafanaDiskManager()
@@ -46,6 +47,7 @@ struct ContentView: View {
     @State private var cleaningStatusMessage: String = ""
 
     @State private var selectedSection: AppSection = .overview
+    @State private var selectedTaskDetailsID: UUID?
     @State private var selectedMetricsPreview: String = "Выбери history-файл, чтобы посмотреть его содержимое."
     @State private var selectedMetricsPreviewTitle: String = "Просмотр history"
     @State private var fileListRefreshToken = 0
@@ -87,17 +89,6 @@ struct ContentView: View {
         return GrafanaConstructorManager.shared.generatedPackages()
     }
 
-    private var currentGeneratedItems: [GrafanaConstructorGeneratedItem] {
-        currentGeneratedPackages.map { package in
-            GrafanaConstructorGeneratedItem(
-                id: package.dashboardUID,
-                dashboardName: package.dashboardName,
-                packagePath: package.packageURL.path,
-                interval: package.interval,
-                hostCount: package.hostCount
-            )
-        }
-    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -174,6 +165,8 @@ struct ContentView: View {
                         .tag(AppSection.overview)
                     Label(AppSection.constructor.title, systemImage: AppSection.constructor.systemImage)
                         .tag(AppSection.constructor)
+                    Label(AppSection.tasks.title, systemImage: AppSection.tasks.systemImage)
+                        .tag(AppSection.tasks)
                     Label(AppSection.metrics.title, systemImage: AppSection.metrics.systemImage)
                         .tag(AppSection.metrics)
                     Label(AppSection.scripts.title, systemImage: AppSection.scripts.systemImage)
@@ -214,6 +207,8 @@ struct ContentView: View {
                     overviewPage
                 case .constructor:
                     constructorPage
+                case .tasks:
+                    tasksPage
                 case .metrics:
                     metricsPage
                 case .scripts:
@@ -236,18 +231,21 @@ struct ContentView: View {
 
         AppCard(title: "Скрипты") {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Запускать скрипты при запуске", isOn: $autoStartScriptsOnLaunch)
+                Toggle("Автозапуск мониторинга", isOn: $autoStartScriptsOnLaunch)
                     .toggleStyle(.switch)
                     .onChange(of: autoStartScriptsOnLaunch) { _, isEnabled in
-                        applyScriptsAutoStartSetting(isEnabled)
+                        lastActionMessage = isEnabled
+                            ? "Автозапуск мониторинга включён. При следующем запуске Grafana.app будут восстановлены пользовательские расписания и активные задачи."
+                            : "Автозапуск мониторинга отключён. Текущие задачи и расписания продолжают работать до ручной остановки."
                     }
 
-                Text("По умолчанию включено. ON сразу запускает сохранённые расписания и включает их автозапуск при следующем старте Grafana.app. OFF сразу останавливает расписания и отключает их автозапуск.")
+                Text("ON восстанавливает мониторинг после запуска Grafana.app. OFF только отключает автоматическое восстановление и не останавливает уже работающие задачи или пользовательские расписания.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
     }
+
 
     @ViewBuilder
     private var constructorPage: some View {
@@ -256,10 +254,50 @@ struct ContentView: View {
                 dashboardName: $constructorDashboardName,
                 interval: $constructorInterval,
                 hosts: $constructorHosts,
-                onCreateDashboard: createConstructorDashboard,
-                generatedItems: currentGeneratedItems,
-                onDeleteGeneratedItem: requestDeleteGeneratedItem
+                onCreateDashboard: createConstructorDashboard
             )
+        }
+    }
+
+    @ViewBuilder
+    private var tasksPage: some View {
+        AppCard(title: "Задачи") {
+            if let selectedTaskDetailsID,
+               let task = taskManager.tasks.first(where: { $0.id == selectedTaskDetailsID }) {
+                GrafanaCardTaskDetails(
+                    task: task,
+                    onBack: {
+                        self.selectedTaskDetailsID = nil
+                    },
+                    onStart: {
+                        startMonitoringTask(task)
+                    },
+                    onStop: {
+                        stopMonitoringTask(task)
+                    },
+                    onOpenScript: {
+                        openTaskScript(task)
+                    },
+                    onAdjustIntervalAutomatically: { seconds in
+                        adjustMonitoringTaskInterval(task, seconds: seconds)
+                    }
+                )
+            } else {
+                GrafanaCardTasks(
+                    taskManager: taskManager,
+                    onStartTask: startMonitoringTask,
+                    onStopTask: stopMonitoringTask,
+                    onDeleteTask: requestDeleteTask,
+                    onShowDetails: { task in
+                        selectedTaskDetailsID = task.id
+                    },
+                    onStartAll: startAllMonitoringTasks,
+                    onStopAll: stopAllMonitoringTasks,
+                    onOpenScripts: {
+                        selectedSection = .scripts
+                    }
+                )
+            }
         }
     }
 
@@ -447,9 +485,194 @@ struct ContentView: View {
         )
     }
 
-    private func requestDeleteGeneratedItem(_ item: GrafanaConstructorGeneratedItem) {
+    private func startMonitoringTask(_ task: GrafanaMonitoringTask) {
+        guard let package = currentGeneratedPackages.first(where: {
+            $0.dashboardUID == task.dashboardUID
+        }) else {
+            taskManager.updateRuntime(
+                dashboardUID: task.dashboardUID,
+                state: .error,
+                activity: "Generated-пакет задачи не найден",
+                lastError: "Generated-пакет задачи не найден"
+            )
+            lastActionMessage = "Не удалось запустить задачу “\(task.dashboardName)”: Generated-пакет не найден."
+            return
+        }
+
+        taskManager.updateRuntime(
+            dashboardUID: task.dashboardUID,
+            state: .starting,
+            activity: "Подготавливаю dashboard и первый сбор..."
+        )
+        lastActionMessage = "Запускаю задачу “\(task.dashboardName)”..."
+
+        Task {
+            do {
+                _ = try await manager.installGeneratedDashboardInGrafana(
+                    from: package.dashboardURL,
+                    dashboardUID: package.dashboardUID
+                )
+
+                await MainActor.run {
+                    taskManager.updateRuntime(
+                        dashboardUID: task.dashboardUID,
+                        state: .starting,
+                        activity: "Выполняю первый сбор метрик..."
+                    )
+                    scriptManager.runScript(package.scriptURL)
+                }
+
+                try await Task.sleep(for: .seconds(1))
+
+                await MainActor.run {
+                    _ = scriptManager.startSchedule(for: package.scriptURL)
+                    do {
+                        try GrafanaConstructorManager.shared.updateDesiredState(.running, for: package)
+                        taskManager.setDesiredState(.running, dashboardUID: task.dashboardUID)
+                    } catch {
+                        scriptManager.stopScriptAndSchedule(package.scriptURL)
+                        taskManager.setDesiredState(.stopped, dashboardUID: task.dashboardUID)
+                        taskManager.updateRuntime(
+                            dashboardUID: task.dashboardUID,
+                            state: .error,
+                            activity: "Не удалось сохранить состояние запуска",
+                            lastError: error.localizedDescription
+                        )
+                        lastActionMessage = "Задача “\(task.dashboardName)” не запущена: не удалось сохранить её состояние — \(error.localizedDescription)"
+                        return
+                    }
+                    taskManager.updateRuntime(
+                        dashboardUID: task.dashboardUID,
+                        state: .running,
+                        activity: "Сбор метрик запущен по расписанию"
+                    )
+                    refreshDiskSizes()
+                    fileListRefreshToken += 1
+                    lastActionMessage = "Задача “\(task.dashboardName)” запущена. Dashboard создан в Grafana, первый сбор стартовал, расписание включено."
+                }
+            } catch {
+                await MainActor.run {
+                    taskManager.setDesiredState(.stopped, dashboardUID: task.dashboardUID)
+                    taskManager.updateRuntime(
+                        dashboardUID: task.dashboardUID,
+                        state: .error,
+                        activity: "Не удалось запустить задачу",
+                        lastError: error.localizedDescription
+                    )
+                    lastActionMessage = "Не удалось запустить задачу “\(task.dashboardName)”: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func stopMonitoringTask(_ task: GrafanaMonitoringTask) {
+        guard let package = currentGeneratedPackages.first(where: {
+            $0.dashboardUID == task.dashboardUID
+        }) else {
+            taskManager.setDesiredState(.stopped, dashboardUID: task.dashboardUID)
+            taskManager.updateRuntime(
+                dashboardUID: task.dashboardUID,
+                state: .stopped,
+                activity: "Остановлена"
+            )
+            lastActionMessage = "Задача “\(task.dashboardName)” остановлена, но её Generated-пакет не найден."
+            return
+        }
+
+        scriptManager.stopScriptAndSchedule(package.scriptURL)
+
+        do {
+            try GrafanaConstructorManager.shared.updateDesiredState(.stopped, for: package)
+            taskManager.setDesiredState(.stopped, dashboardUID: task.dashboardUID)
+            taskManager.updateRuntime(
+                dashboardUID: task.dashboardUID,
+                state: .stopped,
+                activity: "Остановлена"
+            )
+            lastActionMessage = "Задача “\(task.dashboardName)” остановлена. Dashboard и исторические метрики сохранены."
+        } catch {
+            taskManager.updateRuntime(
+                dashboardUID: task.dashboardUID,
+                state: .error,
+                activity: "Задача остановлена, но состояние не сохранено",
+                lastError: error.localizedDescription
+            )
+            lastActionMessage = "Задача “\(task.dashboardName)” остановлена, но не удалось сохранить состояние в config.json: \(error.localizedDescription)"
+        }
+    }
+
+    private func openTaskScript(_ task: GrafanaMonitoringTask) {
+        let scriptURL = URL(fileURLWithPath: task.scriptPath)
+        selectedSection = .scripts
+        previewScriptFile(scriptURL)
+    }
+
+    private func adjustMonitoringTaskInterval(_ task: GrafanaMonitoringTask, seconds: Int) {
+        guard let package = currentGeneratedPackages.first(where: {
+            $0.dashboardUID == task.dashboardUID
+        }) else {
+            lastActionMessage = "Не удалось скорректировать интервал задачи “\(task.dashboardName)”: Generated-пакет не найден."
+            return
+        }
+
+        let wasRunning = task.runtime.state == .running ||
+            task.runtime.state == .starting ||
+            task.runtime.state == .reconnecting
+
+        do {
+            if wasRunning {
+                scriptManager.stopScriptAndSchedule(package.scriptURL)
+            }
+
+            try GrafanaConstructorManager.shared.updateInterval(
+                seconds: seconds,
+                for: package
+            )
+
+            scriptManager.updateScheduleText("\(seconds)s", for: package.scriptURL)
+            taskManager.updateInterval("\(seconds)s", dashboardUID: task.dashboardUID)
+
+            if wasRunning {
+                _ = scriptManager.startSchedule(for: package.scriptURL)
+            }
+
+            Task {
+                do {
+                    _ = try await manager.installGeneratedDashboardInGrafana(
+                        from: package.dashboardURL,
+                        dashboardUID: package.dashboardUID
+                    )
+
+                    await MainActor.run {
+                        taskManager.updateRuntime(
+                            dashboardUID: task.dashboardUID,
+                            state: wasRunning ? .running : .stopped,
+                            activity: wasRunning ? "Сбор метрик запущен по расписанию" : "Остановлена",
+                            nextCollectionDate: wasRunning ? Date().addingTimeInterval(TimeInterval(seconds)) : nil
+                        )
+                        fileListRefreshToken += 1
+                        lastActionMessage = "Задача “\(task.dashboardName)” скорректирована: сбор каждые \(seconds) сек, обновление dashboard каждые \(seconds + 10) сек."
+                    }
+                } catch {
+                    await MainActor.run {
+                        taskManager.updateRuntime(
+                            dashboardUID: task.dashboardUID,
+                            state: .error,
+                            activity: "Интервал изменён, но dashboard Grafana не обновлён",
+                            lastError: error.localizedDescription
+                        )
+                        lastActionMessage = "Интервал задачи “\(task.dashboardName)” изменён на \(seconds) сек, но не удалось обновить dashboard Grafana: \(error.localizedDescription)"
+                    }
+                }
+            }
+        } catch {
+            lastActionMessage = "Не удалось скорректировать интервал задачи “\(task.dashboardName)”: \(error.localizedDescription)"
+        }
+    }
+
+    private func requestDeleteTask(_ task: GrafanaMonitoringTask) {
         generatedPackagePendingDeletion = currentGeneratedPackages.first {
-            $0.dashboardUID == item.id
+            $0.dashboardUID == task.dashboardUID
         }
     }
 
@@ -473,6 +696,10 @@ struct ContentView: View {
                 await MainActor.run {
                     refreshDiskSizes()
                     fileListRefreshToken += 1
+                    if selectedTaskDetailsID == package.taskID {
+                        selectedTaskDetailsID = nil
+                    }
+                    taskManager.remove(dashboardUID: package.dashboardUID)
                     lastActionMessage = """
                     Сгенерированный мониторинг “\(package.dashboardName)” удалён.
 
@@ -511,7 +738,7 @@ struct ContentView: View {
         }
 
         guard !dashboardName.isEmpty, !configuredHosts.isEmpty else {
-            lastActionMessage = "Конструктор: укажи название дашборда и хотя бы один адрес узла с выбранной проверкой."
+            lastActionMessage = "Конструктор: укажи название задачи и хотя бы один адрес узла с выбранной проверкой."
             return
         }
 
@@ -523,73 +750,34 @@ struct ContentView: View {
             )
 
             scriptManager.updateScheduleText(constructorInterval.rawValue, for: result.scriptURL)
-            scriptManager.runScript(result.scriptURL)
-            _ = scriptManager.startSchedule(for: result.scriptURL)
+
+            let task = GrafanaMonitoringTask(
+                id: result.taskID,
+                dashboardName: dashboardName,
+                dashboardUID: result.dashboardUID,
+                interval: constructorInterval.rawValue,
+                hostCount: configuredHosts.count,
+                packagePath: result.directoryURL.path,
+                scriptPath: result.scriptURL.path,
+                desiredState: .stopped,
+                runtime: .idle
+            )
+
+            taskManager.upsert(task)
+            refreshDiskSizes()
+            fileListRefreshToken += 1
+            selectedSection = .tasks
 
             lastActionMessage = """
-            Пакет мониторинга “\(dashboardName)” создан.
+            Задача “\(dashboardName)” создана.
 
-            Скрипт запущен, расписание включено.
-            Подключаю Prometheus datasource и импортирую dashboard в Grafana...
+            Состояние: Не запущена.
+            Скрипт и конфигурация подготовлены, но сбор метрик, расписание и dashboard Grafana ещё не запущены.
+
+            Открой “Задачи” и запусти её, когда будешь готов.
             """
-
-            Task {
-                do {
-                    let installedDashboardURL = try await manager.installGeneratedDashboardInGrafana(
-                        from: result.dashboardURL,
-                        dashboardUID: result.dashboardUID
-                    )
-
-                    await MainActor.run {
-                        refreshDiskSizes()
-                        refreshFileLists()
-
-                        lastActionMessage = """
-                        Конструктор создал мониторинг “\(dashboardName)”.
-
-                        Папка пакета:
-                        \(result.directoryURL.path)
-
-                        Скрипт:
-                        \(result.scriptURL.lastPathComponent)
-
-                        Конфигурация:
-                        \(result.configURL.lastPathComponent)
-
-                        Dashboard JSON:
-                        \(result.dashboardURL.lastPathComponent)
-
-                        Provisioning-копия:
-                        \(installedDashboardURL.path)
-
-                        UID: \(result.dashboardUID)
-                        Интервал сбора: \(constructorInterval.title)
-
-                        Prometheus datasource проверен/создан через Grafana API.
-                        Dashboard импортирован через Grafana API.
-                        Generated-скрипт работает по расписанию.
-                        """
-                    }
-                } catch {
-                    await MainActor.run {
-                        refreshDiskSizes()
-                        refreshFileLists()
-                        lastActionMessage = """
-                        Пакет мониторинга “\(dashboardName)” создан, скрипт и расписание запущены, но Grafana API не завершил настройку.
-
-                        Ошибка:
-                        \(error.localizedDescription)
-
-                        Dashboard JSON:
-                        \(result.dashboardURL.path)
-
-                        UID: \(result.dashboardUID)
-                        """
-                    }
-                }
-            }
         } catch {
-            lastActionMessage = "Конструктор: не удалось создать пакет мониторинга — \(error.localizedDescription)"
+            lastActionMessage = "Конструктор: не удалось создать задачу — \(error.localizedDescription)"
         }
     }
 
@@ -664,24 +852,47 @@ struct ContentView: View {
     }
 
     private func grafanaCredentialsStatusText() -> String {
-        "Grafana login: \(grafanaAutologinUsername)\nGrafana password: сгенерирован, нажми “Скопировать пароль”\nCredentials file: \(manager.grafanaAdminCredentialsURL.path)"
+        "Grafana login: \(grafanaAutologinUsername)\nGrafana password: сгенерирован автоматически\nCredentials file: \(manager.grafanaAdminCredentialsURL.path)"
     }
 
 
-    private func applyScriptsAutoStartSetting(_ isEnabled: Bool) {
-        if isEnabled {
-            let allScriptFiles = currentScriptFiles + currentGeneratedScriptFiles
-            scriptManager.startAllStoredSchedules(scriptFiles: allScriptFiles)
 
-            if scriptManager.hasSchedules {
-                lastActionMessage = "Автозапуск скриптов включён. Сохранённые расписания запущены."
-            } else {
-                lastActionMessage = "Автозапуск скриптов включён. Сохранённых расписаний пока нет."
-            }
-        } else {
-            scriptManager.cancelAllSchedules()
-            lastActionMessage = "Автозапуск скриптов отключён. Все активные расписания остановлены. Уже выполняющийся одиночный запуск скрипта не прерывается."
+    private func startAllMonitoringTasks() {
+        let stoppedTasks = taskManager.tasks.filter {
+            $0.runtime.state != .running &&
+            $0.runtime.state != .starting &&
+            $0.runtime.state != .reconnecting
         }
+
+        guard !stoppedTasks.isEmpty else {
+            lastActionMessage = "Все задачи уже запущены."
+            return
+        }
+
+        for task in stoppedTasks {
+            startMonitoringTask(task)
+        }
+
+        lastActionMessage = "Запускаю все остановленные задачи мониторинга."
+    }
+
+    private func stopAllMonitoringTasks() {
+        let runningTasks = taskManager.tasks.filter {
+            $0.runtime.state == .running ||
+            $0.runtime.state == .starting ||
+            $0.runtime.state == .reconnecting
+        }
+
+        guard !runningTasks.isEmpty else {
+            lastActionMessage = "Запущенных задач нет."
+            return
+        }
+
+        for task in runningTasks {
+            stopMonitoringTask(task)
+        }
+
+        lastActionMessage = "Все запущенные задачи мониторинга остановлены."
     }
 
     private func grafanaWindowSize() -> CGSize {
@@ -691,6 +902,32 @@ struct ContentView: View {
         )
     }
 
+    private func loadMonitoringTasks() {
+        let tasks = GrafanaConstructorManager.shared.generatedPackages().map { package in
+            GrafanaMonitoringTask(
+                id: package.taskID,
+                dashboardName: package.dashboardName,
+                dashboardUID: package.dashboardUID,
+                interval: package.interval,
+                hostCount: package.hostCount,
+                packagePath: package.packageURL.path,
+                scriptPath: package.scriptURL.path,
+                desiredState: package.desiredState,
+                runtime: GrafanaMonitoringTaskRuntimeStatus(
+                    state: .stopped,
+                    activity: package.desiredState == .running ? "Не запущена в текущем сеансе" : "Остановлена",
+                    lastSuccessfulCollection: nil,
+                    lastCollectionDuration: nil,
+                    nextCollectionDate: nil,
+                    lastError: nil
+                ),
+                createdAt: package.createdAt
+            )
+        }
+
+        taskManager.replaceTasks(tasks)
+    }
+    
     private func prepareWorkspace() {
         do {
             try manager.prepareWorkspace()
@@ -702,15 +939,29 @@ struct ContentView: View {
             updateMessage = "Компоненты Grafana и Prometheus управляются через раздел “Инструменты”."
             fileListRefreshToken += 1
 
+            loadMonitoringTasks()
+
             if autoStartScriptsOnLaunch {
                 scriptManager.startAllStoredSchedules(
-                    scriptFiles: scriptManager.scriptFiles() + scriptManager.generatedScriptFiles()
+                    scriptFiles: scriptManager.scriptFiles()
                 )
-                if scriptManager.hasSchedules {
-                    lastActionMessage += "\n\nРасписания скриптов запущены автоматически."
+
+                let runningPackages = GrafanaConstructorManager.shared.generatedPackages().filter {
+                    $0.desiredState == .running
                 }
+
+                for package in runningPackages {
+                    _ = scriptManager.startSchedule(for: package.scriptURL)
+                    taskManager.updateRuntime(
+                        dashboardUID: package.dashboardUID,
+                        state: .running,
+                        activity: "Сбор метрик восстановлен после запуска приложения"
+                    )
+                }
+
+                lastActionMessage += "\n\nАвтозапуск мониторинга выполнен: пользовательские расписания и активные задачи восстановлены."
             } else {
-                lastActionMessage += "\n\nАвтозапуск скриптов отключён в настройке на Главной."
+                lastActionMessage += "\n\nАвтозапуск мониторинга отключён. Пользовательские расписания и задачи автоматически не запускались."
             }
         } catch {
             grafanaStatus = .warning
@@ -1003,14 +1254,13 @@ struct ContentView: View {
     }
 
     private func startAllScriptSchedules() {
-        let allScriptFiles = currentScriptFiles + currentGeneratedScriptFiles
-        scriptManager.startAllStoredSchedules(scriptFiles: allScriptFiles)
-        lastActionMessage = "Расписания всех пользовательских и сгенерированных скриптов с заполненным интервалом запущены."
+        scriptManager.startAllStoredSchedules(scriptFiles: currentScriptFiles)
+        lastActionMessage = "Расписания пользовательских скриптов с заполненным интервалом запущены. Generated-задачи управляются во вкладке “Задачи”."
     }
 
     private func cancelAllScriptSchedules() {
         scriptManager.cancelAllSchedules()
-        lastActionMessage = "Все расписания скриптов остановлены. Уже запущенные процессы можно остановить отдельной кнопкой “Остановить”."
+        lastActionMessage = "Все пользовательские расписания остановлены. Generated-задачи не затронуты. Уже запущенные процессы можно остановить отдельной кнопкой “Остановить”."
     }
 
     private func clearMetricsHistory() {

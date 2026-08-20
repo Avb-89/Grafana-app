@@ -11,6 +11,7 @@ import SwiftUI
 enum AppSection: Hashable {
     case overview
     case constructor
+    case tasks
     case metrics
     case scripts
     case cleanup
@@ -22,6 +23,8 @@ enum AppSection: Hashable {
             return "Главная"
         case .constructor:
             return "Конструктор"
+        case .tasks:
+            return "Задачи"
         case .metrics:
             return "Метрики"
         case .scripts:
@@ -39,6 +42,8 @@ enum AppSection: Hashable {
             return "gauge.with.dots.needle.67percent"
         case .constructor:
             return "wand.and.stars"
+        case .tasks:
+            return "list.bullet.clipboard"
         case .metrics:
             return "chart.xyaxis.line"
         case .scripts:

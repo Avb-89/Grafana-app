@@ -80,21 +80,28 @@ struct GrafanaConstructorHost: Identifiable, Hashable {
     }
 }
 
-enum GrafanaConstructorInterval: String, CaseIterable, Identifiable, Hashable {
-    case tenSeconds = "10s"
-    case thirtySeconds = "30s"
-    case oneMinute = "1m"
-    case fiveMinutes = "5m"
+struct GrafanaConstructorInterval: Identifiable, Hashable {
+    var seconds: Int
 
-    var id: String { rawValue }
+    static let tenSeconds = GrafanaConstructorInterval(seconds: 10)
+    static let thirtySeconds = GrafanaConstructorInterval(seconds: 30)
+    static let oneMinute = GrafanaConstructorInterval(seconds: 60)
+    static let fiveMinutes = GrafanaConstructorInterval(seconds: 300)
+
+    var id: Int { seconds }
+    var rawValue: String { "\(seconds)s" }
 
     var title: String {
-        switch self {
-        case .tenSeconds: return "10 секунд"
-        case .thirtySeconds: return "30 секунд"
-        case .oneMinute: return "1 минута"
-        case .fiveMinutes: return "5 минут"
+        if seconds < 60 {
+            return "\(seconds) сек"
         }
+
+        if seconds.isMultiple(of: 60) {
+            let minutes = seconds / 60
+            return "\(minutes) мин"
+        }
+
+        return "\(seconds) сек"
     }
 }
 
@@ -185,19 +192,59 @@ struct GrafanaCardConstructor: View {
                 Text("Интервал сбора")
                     .font(.subheadline.weight(.semibold))
 
-                Picker("Интервал сбора", selection: $interval) {
-                    ForEach(GrafanaConstructorInterval.allCases) { option in
-                        Text(option.title)
-                            .tag(option)
-                    }
+                TextField("30", text: intervalSecondsText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 90)
+
+                Text("сек")
+                    .foregroundStyle(.secondary)
+
+                Button("10") {
+                    interval = .tenSeconds
                 }
-                .pickerStyle(.segmented)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("30") {
+                    interval = .thirtySeconds
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("60") {
+                    interval = .oneMinute
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("300") {
+                    interval = .fiveMinutes
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Spacer()
             }
 
-            Text("Каждый запуск Конструктора создаёт отдельный дашборд Grafana с собственным набором узлов и проверок. Интервал определяет, как часто generated-скрипт будет собирать новые метрики.")
+            Text("Интервал задаётся в секундах и определяет частоту запуска generated-скрипта. После первого успешного сбора его можно автоматически скорректировать по реальной длительности выполнения задачи.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private var intervalSecondsText: Binding<String> {
+        Binding(
+            get: {
+                String(interval.seconds)
+            },
+            set: { newValue in
+                let digits = newValue.filter(\.isNumber)
+                guard let seconds = Int(digits), seconds > 0 else {
+                    return
+                }
+                interval = GrafanaConstructorInterval(seconds: seconds)
+            }
+        )
     }
 
     private var hostsSection: some View {
@@ -436,3 +483,4 @@ struct GrafanaCardConstructor: View {
         }
     }
 }
+

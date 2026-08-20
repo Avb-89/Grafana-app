@@ -9,6 +9,7 @@
 import Foundation
 
 struct GrafanaConstructorPackageResult {
+    let taskID: UUID
     let directoryURL: URL
     let scriptURL: URL
     let configURL: URL
@@ -18,6 +19,7 @@ struct GrafanaConstructorPackageResult {
 
 struct GrafanaGeneratedPackage: Identifiable, Hashable {
     let id: String
+    let taskID: UUID
     let dashboardName: String
     let dashboardUID: String
     let interval: String
@@ -26,6 +28,8 @@ struct GrafanaGeneratedPackage: Identifiable, Hashable {
     let scriptURL: URL
     let configURL: URL
     let dashboardURL: URL
+    let desiredState: GrafanaMonitoringTaskDesiredState
+    let createdAt: Date
 }
 
 enum GrafanaConstructorManagerError: LocalizedError {
@@ -97,6 +101,80 @@ final class GrafanaConstructorManager {
         }
     }
 
+    func updateDesiredState(
+        _ desiredState: GrafanaMonitoringTaskDesiredState,
+        for package: GrafanaGeneratedPackage
+    ) throws {
+        let configURL = package.configURL
+        let data = try Data(contentsOf: configURL)
+
+        guard var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(
+                domain: "GrafanaConstructorManager.Config",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Не удалось прочитать config.json задачи."]
+            )
+        }
+
+        object["desiredState"] = desiredState.rawValue
+
+        let updatedData = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try updatedData.write(to: configURL, options: .atomic)
+    }
+
+    func updateInterval(
+        seconds: Int,
+        for package: GrafanaGeneratedPackage
+    ) throws {
+        guard seconds > 0 else {
+            throw NSError(
+                domain: "GrafanaConstructorManager.Interval",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Интервал должен быть больше нуля."]
+            )
+        }
+
+        let intervalValue = "\(seconds)s"
+        let dashboardRefreshValue = "\(seconds + 10)s"
+
+        let configData = try Data(contentsOf: package.configURL)
+        guard var configObject = try JSONSerialization.jsonObject(with: configData) as? [String: Any] else {
+            throw NSError(
+                domain: "GrafanaConstructorManager.Config",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Не удалось прочитать config.json задачи."]
+            )
+        }
+
+        configObject["interval"] = intervalValue
+
+        let updatedConfigData = try JSONSerialization.data(
+            withJSONObject: configObject,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try updatedConfigData.write(to: package.configURL, options: .atomic)
+
+        let dashboardData = try Data(contentsOf: package.dashboardURL)
+        guard var dashboardObject = try JSONSerialization.jsonObject(with: dashboardData) as? [String: Any] else {
+            throw NSError(
+                domain: "GrafanaConstructorManager.Dashboard",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "Не удалось прочитать dashboard JSON задачи."]
+            )
+        }
+
+        dashboardObject["refresh"] = dashboardRefreshValue
+
+        let updatedDashboardData = try JSONSerialization.data(
+            withJSONObject: dashboardObject,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try updatedDashboardData.write(to: package.dashboardURL, options: .atomic)
+    }
+
     func generatePackage(
         dashboardName: String,
         interval: GrafanaConstructorInterval,
@@ -115,9 +193,10 @@ final class GrafanaConstructorManager {
             throw GrafanaConstructorManagerError.noHosts
         }
 
-
         let slug = makeSlug(from: cleanDashboardName)
         let dashboardUID = makeDashboardUID(slug: slug)
+        let taskID = UUID()
+        let createdAt = Date()
 
         let generatedRootURL = manager.scriptsURL.appendingPathComponent("Generated", isDirectory: true)
         let packageURL = uniquePackageURL(rootURL: generatedRootURL, preferredSlug: slug)
@@ -129,10 +208,13 @@ final class GrafanaConstructorManager {
         let dashboardURL = packageURL.appendingPathComponent("dashboard_\(slug).json")
 
         let configData = try makeConfigData(
+            taskID: taskID,
             dashboardName: cleanDashboardName,
             dashboardUID: dashboardUID,
             slug: slug,
             interval: interval,
+            desiredState: .stopped,
+            createdAt: createdAt,
             hosts: configuredHosts
         )
         try configData.write(to: configURL, options: .atomic)
@@ -154,6 +236,7 @@ final class GrafanaConstructorManager {
         try dashboardData.write(to: dashboardURL, options: .atomic)
 
         return GrafanaConstructorPackageResult(
+            taskID: taskID,
             directoryURL: packageURL,
             scriptURL: scriptURL,
             configURL: configURL,
@@ -173,8 +256,31 @@ final class GrafanaConstructorManager {
             return nil
         }
 
+        let taskID: UUID
+        if let taskIDString = object["taskID"] as? String,
+           let parsedTaskID = UUID(uuidString: taskIDString) {
+            taskID = parsedTaskID
+        } else {
+            taskID = UUID()
+        }
+
         let interval = object["interval"] as? String ?? "—"
         let hosts = object["hosts"] as? [[String: Any]] ?? []
+
+        let desiredState = GrafanaMonitoringTaskDesiredState(
+            rawValue: object["desiredState"] as? String ?? "stopped"
+        ) ?? .stopped
+
+        let createdAt: Date
+        if let createdAtString = object["createdAt"] as? String,
+           let parsedCreatedAt = ISO8601DateFormatter().date(from: createdAtString) {
+            createdAt = parsedCreatedAt
+        } else if let generatedAtString = object["generatedAt"] as? String,
+                  let parsedGeneratedAt = ISO8601DateFormatter().date(from: generatedAtString) {
+            createdAt = parsedGeneratedAt
+        } else {
+            createdAt = Date.distantPast
+        }
 
         let files = (try? fileManager.contentsOfDirectory(
             at: packageURL,
@@ -194,6 +300,7 @@ final class GrafanaConstructorManager {
 
         return GrafanaGeneratedPackage(
             id: dashboardUID,
+            taskID: taskID,
             dashboardName: dashboardName,
             dashboardUID: dashboardUID,
             interval: interval,
@@ -201,7 +308,9 @@ final class GrafanaConstructorManager {
             packageURL: packageURL,
             scriptURL: scriptURL,
             configURL: configURL,
-            dashboardURL: dashboardURL
+            dashboardURL: dashboardURL,
+            desiredState: desiredState,
+            createdAt: createdAt
         )
     }
 
@@ -272,10 +381,13 @@ final class GrafanaConstructorManager {
     }
 
     private func makeConfigData(
+        taskID: UUID,
         dashboardName: String,
         dashboardUID: String,
         slug: String,
         interval: GrafanaConstructorInterval,
+        desiredState: GrafanaMonitoringTaskDesiredState,
+        createdAt: Date,
         hosts: [GrafanaConstructorHost]
     ) throws -> Data {
         let hostObjects: [[String: Any]] = hosts.map { host in
@@ -289,12 +401,15 @@ final class GrafanaConstructorManager {
         }
 
         let object: [String: Any] = [
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "taskID": taskID.uuidString,
             "dashboardName": dashboardName,
             "dashboardUID": dashboardUID,
             "slug": slug,
             "interval": interval.rawValue,
-            "generatedAt": ISO8601DateFormatter().string(from: Date()),
+            "desiredState": desiredState.rawValue,
+            "createdAt": ISO8601DateFormatter().string(from: createdAt),
+            "generatedAt": ISO8601DateFormatter().string(from: createdAt),
             "hosts": hostObjects
         ]
 
@@ -665,7 +780,7 @@ final class GrafanaConstructorManager {
             "id": NSNull(),
             "links": [],
             "panels": panels,
-            "refresh": interval.rawValue,
+            "refresh": "\(interval.seconds + 10)s",
             "schemaVersion": 41,
             "tags": ["Grafana.app", "Constructor"],
             "templating": ["list": []],
