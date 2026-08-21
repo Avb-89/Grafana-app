@@ -24,6 +24,7 @@ struct GrafanaGeneratedPackage: Identifiable, Hashable {
     let dashboardUID: String
     let interval: String
     let hostCount: Int
+    let hosts: [GrafanaMonitoringTaskHost]
     let packageURL: URL
     let scriptURL: URL
     let configURL: URL
@@ -186,7 +187,9 @@ final class GrafanaConstructorManager {
         }
 
         let configuredHosts = hosts.filter {
-            !$0.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.probes.isEmpty
+            !$0.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            $0.systemType != nil &&
+            !$0.probes.isEmpty
         }
 
         guard !configuredHosts.isEmpty else {
@@ -266,6 +269,24 @@ final class GrafanaConstructorManager {
 
         let interval = object["interval"] as? String ?? "—"
         let hosts = object["hosts"] as? [[String: Any]] ?? []
+        let monitoringHosts: [GrafanaMonitoringTaskHost] = hosts.compactMap { hostObject in
+            guard
+                let idString = hostObject["id"] as? String,
+                let id = UUID(uuidString: idString),
+                let target = hostObject["target"] as? String
+            else {
+                return nil
+            }
+
+            return GrafanaMonitoringTaskHost(
+                id: id,
+                name: hostObject["name"] as? String ?? "",
+                target: target,
+                systemType: hostObject["systemType"] as? String ?? "",
+                probes: hostObject["probes"] as? [String] ?? [],
+                sshUser: hostObject["sshUser"] as? String ?? ""
+            )
+        }
 
         let desiredState = GrafanaMonitoringTaskDesiredState(
             rawValue: object["desiredState"] as? String ?? "stopped"
@@ -305,6 +326,7 @@ final class GrafanaConstructorManager {
             dashboardUID: dashboardUID,
             interval: interval,
             hostCount: hosts.count,
+            hosts: monitoringHosts,
             packageURL: packageURL,
             scriptURL: scriptURL,
             configURL: configURL,
@@ -395,13 +417,14 @@ final class GrafanaConstructorManager {
                 "id": host.id.uuidString,
                 "name": host.name,
                 "target": host.target,
+                "systemType": host.systemType?.rawValue ?? "",
                 "probes": host.probes.map(\.rawValue).sorted(),
                 "sshUser": host.sshUser
             ]
         }
 
         let object: [String: Any] = [
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "taskID": taskID.uuidString,
             "dashboardName": dashboardName,
             "dashboardUID": dashboardUID,

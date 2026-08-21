@@ -64,12 +64,22 @@ struct GrafanaMonitoringTaskRuntimeStatus: Codable, Hashable {
     )
 }
 
+struct GrafanaMonitoringTaskHost: Identifiable, Codable, Hashable {
+    let id: UUID
+    var name: String
+    var target: String
+    var systemType: String
+    var probes: [String]
+    var sshUser: String
+}
+
 struct GrafanaMonitoringTask: Identifiable, Codable, Hashable {
     let id: UUID
     var dashboardName: String
     var dashboardUID: String
     var interval: String
     var hostCount: Int
+    var hosts: [GrafanaMonitoringTaskHost]
     var packagePath: String
     var scriptPath: String
     var desiredState: GrafanaMonitoringTaskDesiredState
@@ -82,6 +92,7 @@ struct GrafanaMonitoringTask: Identifiable, Codable, Hashable {
         dashboardUID: String,
         interval: String,
         hostCount: Int,
+        hosts: [GrafanaMonitoringTaskHost] = [],
         packagePath: String,
         scriptPath: String,
         desiredState: GrafanaMonitoringTaskDesiredState = .stopped,
@@ -93,6 +104,7 @@ struct GrafanaMonitoringTask: Identifiable, Codable, Hashable {
         self.dashboardUID = dashboardUID
         self.interval = interval
         self.hostCount = hostCount
+        self.hosts = hosts
         self.packagePath = packagePath
         self.scriptPath = scriptPath
         self.desiredState = desiredState

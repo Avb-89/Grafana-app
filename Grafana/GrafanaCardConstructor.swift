@@ -5,7 +5,32 @@
 //  Created by SITIS on 8/18/26.
 //
 
+
 import SwiftUI
+
+enum GrafanaConstructorSystemType: String, CaseIterable, Identifiable, Hashable {
+    case linux
+    case windows
+    case macOS
+    case esxi
+    case synology
+    case mikrotik
+    case networkDevice
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .linux: return "Linux"
+        case .windows: return "Windows"
+        case .macOS: return "macOS"
+        case .esxi: return "VMware ESXi"
+        case .synology: return "Synology DSM"
+        case .mikrotik: return "MikroTik RouterOS"
+        case .networkDevice: return "Сетевое устройство"
+        }
+    }
+}
 
 enum GrafanaConstructorProbe: String, CaseIterable, Identifiable, Hashable {
     case ping
@@ -62,6 +87,7 @@ struct GrafanaConstructorHost: Identifiable, Hashable {
     let id: UUID
     var name: String
     var target: String
+    var systemType: GrafanaConstructorSystemType?
     var probes: Set<GrafanaConstructorProbe>
     var sshUser: String
 
@@ -69,12 +95,14 @@ struct GrafanaConstructorHost: Identifiable, Hashable {
         id: UUID = UUID(),
         name: String = "",
         target: String = "",
-        probes: Set<GrafanaConstructorProbe> = [.ping, .latency],
+        systemType: GrafanaConstructorSystemType? = nil,
+        probes: Set<GrafanaConstructorProbe> = [],
         sshUser: String = ""
     ) {
         self.id = id
         self.name = name
         self.target = target
+        self.systemType = systemType
         self.probes = probes
         self.sshUser = sshUser
     }
@@ -122,13 +150,6 @@ struct GrafanaCardConstructor: View {
     var generatedItems: [GrafanaConstructorGeneratedItem] = []
     var onDeleteGeneratedItem: (GrafanaConstructorGeneratedItem) -> Void = { _ in }
 
-    private let externalProbes: [GrafanaConstructorProbe] = [
-        .ping, .latency, .loss, .dns, .name, .tcp, .http, .https, .tls
-    ]
-
-    private let sshProbes: [GrafanaConstructorProbe] = [
-        .cpu, .ram, .disk, .load, .uptime, .swap, .network
-    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -287,62 +308,146 @@ struct GrafanaCardConstructor: View {
                 .help("Удалить узел")
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Быстрый выбор")
-                        .font(.subheadline.weight(.semibold))
+            HStack(spacing: 10) {
+                Text("Тип системы")
+                    .font(.subheadline.weight(.semibold))
 
-                    Spacer()
-                }
+                Picker("Тип системы", selection: host.systemType) {
+                    Text("Выберите тип").tag(GrafanaConstructorSystemType?.none)
 
-                HStack(spacing: 8) {
-                    presetButton("Доступность", probes: [.ping, .latency, .loss, .dns], host: host)
-                    presetButton("Сервер", probes: [.ping, .latency, .loss, .cpu, .ram, .disk, .load, .uptime, .network], host: host)
-                    presetButton("Веб-сервис", probes: [.ping, .latency, .http, .https, .tls], host: host)
-                    presetButton("Всё", probes: Set(GrafanaConstructorProbe.allCases), host: host)
-                }
-            }
-
-            probeSection(
-                title: "Без авторизации",
-                subtitle: "Проверки, которые можно выполнить снаружи.",
-                probes: externalProbes,
-                host: host
-            )
-
-            probeSection(
-                title: "Через SSH",
-                subtitle: "Для CPU, RAM, дисков и других внутренних показателей нужен доступ по SSH-ключу.",
-                probes: sshProbes,
-                host: host
-            )
-
-            if host.wrappedValue.probes.contains(where: { $0.requiresSSH }) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("SSH-доступ", systemImage: "key")
-                        .font(.subheadline.weight(.semibold))
-
-                    TextField("SSH user, например root или admin", text: host.sshUser)
-                        .textFieldStyle(.roundedBorder)
-
-                    if host.wrappedValue.sshUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Label("Для выбранных SSH-проверок укажи пользователя. Доступ по ключу должен быть настроен заранее.", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    } else {
-                        Text("Grafana.app будет использовать уже настроенный SSH-доступ по ключу. Пароль в Конструкторе не сохраняется.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    ForEach(GrafanaConstructorSystemType.allCases) { systemType in
+                        Text(systemType.title)
+                            .tag(Optional(systemType))
                     }
                 }
-                .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .frame(width: 220)
+                .onChange(of: host.wrappedValue.systemType) { _, newValue in
+                    guard let newValue else {
+                        host.wrappedValue.probes.removeAll()
+                        return
+                    }
+
+                    let supported = Set(availableProbes(for: newValue))
+                    host.wrappedValue.probes = host.wrappedValue.probes.intersection(supported)
+                }
+
+                Spacer()
+            }
+
+            if let systemType = host.wrappedValue.systemType {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Быстрый выбор")
+                            .font(.subheadline.weight(.semibold))
+
+                        Spacer()
+                    }
+
+                    HStack(spacing: 8) {
+                        presetButton(
+                            "Доступность",
+                            probes: availabilityPreset(for: systemType),
+                            host: host
+                        )
+                        presetButton(
+                            "Сервер / ПК",
+                            probes: serverPreset(for: systemType),
+                            host: host
+                        )
+                        presetButton(
+                            "Веб-сервис",
+                            probes: webServicePreset(for: systemType),
+                            host: host
+                        )
+                    }
+                }
+
+                let external = externalProbes(for: systemType)
+                if !external.isEmpty {
+                    probeSection(
+                        title: "Без авторизации",
+                        subtitle: "Проверки, которые можно выполнить снаружи для выбранного типа системы.",
+                        probes: external,
+                        host: host
+                    )
+                }
+
+                let privileged = privilegedProbes(for: systemType)
+                if !privileged.isEmpty {
+                    probeSection(
+                        title: "Через SSH",
+                        subtitle: "Внутренние показатели, которые Grafana.app умеет собирать для выбранного типа системы.",
+                        probes: privileged,
+                        host: host
+                    )
+                }
+
+                if host.wrappedValue.probes.contains(where: { $0.requiresSSH }) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("SSH-доступ", systemImage: "key")
+                            .font(.subheadline.weight(.semibold))
+
+                        TextField("SSH user, например root или admin", text: host.sshUser)
+                            .textFieldStyle(.roundedBorder)
+
+                        if host.wrappedValue.sshUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Label("Для выбранных SSH-проверок укажи пользователя. Доступ по ключу должен быть настроен заранее.", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("Grafana.app будет использовать уже настроенный SSH-доступ по ключу. Пароль в Конструкторе не сохраняется.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            } else {
+                Text("Сначала выбери тип системы. После этого появятся только поддерживаемые для неё проверки и готовые профили мониторинга.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
             }
         }
         .padding(16)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func externalProbes(for systemType: GrafanaConstructorSystemType) -> [GrafanaConstructorProbe] {
+        switch systemType {
+        case .linux, .windows, .macOS, .esxi, .synology, .mikrotik, .networkDevice:
+            return [.ping, .latency, .loss, .dns, .name, .tcp, .http, .https, .tls]
+        }
+    }
+
+    private func privilegedProbes(for systemType: GrafanaConstructorSystemType) -> [GrafanaConstructorProbe] {
+        switch systemType {
+        case .linux:
+            return [.cpu, .ram, .disk, .load, .uptime, .swap, .network]
+        case .windows, .macOS, .esxi, .synology, .mikrotik, .networkDevice:
+            return []
+        }
+    }
+
+    private func availableProbes(for systemType: GrafanaConstructorSystemType) -> [GrafanaConstructorProbe] {
+        externalProbes(for: systemType) + privilegedProbes(for: systemType)
+    }
+
+    private func availabilityPreset(for systemType: GrafanaConstructorSystemType) -> Set<GrafanaConstructorProbe> {
+        Set([.ping, .latency, .loss, .dns, .name, .tcp]).intersection(availableProbes(for: systemType))
+    }
+
+    private func serverPreset(for systemType: GrafanaConstructorSystemType) -> Set<GrafanaConstructorProbe> {
+        Set([.ping, .latency, .loss, .dns, .name, .tcp, .cpu, .ram, .disk, .load, .uptime, .network])
+            .intersection(availableProbes(for: systemType))
+    }
+
+    private func webServicePreset(for systemType: GrafanaConstructorSystemType) -> Set<GrafanaConstructorProbe> {
+        Set([.ping, .latency, .http, .https, .tls, .cpu, .ram, .disk])
+            .intersection(availableProbes(for: systemType))
     }
 
     private func probeSection(
@@ -416,7 +521,9 @@ struct GrafanaCardConstructor: View {
         }
 
         let configuredHosts = hosts.filter { host in
-            !host.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !host.probes.isEmpty
+            !host.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            host.systemType != nil &&
+            !host.probes.isEmpty
         }
 
         guard !configuredHosts.isEmpty else {

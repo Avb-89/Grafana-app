@@ -97,6 +97,38 @@ struct GrafanaCardTaskDetails: View {
                 detailRow("Пакет задачи", value: task.packagePath, monospaced: true)
             }
 
+            if !task.hosts.isEmpty {
+                detailsSection(title: "Узлы") {
+                    ForEach(task.hosts) { host in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Text(host.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? host.target : host.name)
+                                    .font(.subheadline.weight(.semibold))
+
+                                Text(systemTypeTitle(host.systemType))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                Spacer()
+                            }
+
+                            detailRow("Адрес", value: host.target, monospaced: true)
+                            detailRow("Тип системы", value: systemTypeTitle(host.systemType))
+                            detailRow("Метрики", value: probeTitles(host.probes))
+
+                            if !host.sshUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                detailRow("SSH user", value: host.sshUser, monospaced: true)
+                            }
+                        }
+
+                        if host.id != task.hosts.last?.id {
+                            Divider()
+                                .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+
             detailsSection(title: "Диагностика") {
                 if let error = task.runtime.lastError, !error.isEmpty {
                     Text(error)
@@ -149,6 +181,25 @@ struct GrafanaCardTaskDetails: View {
 
             Spacer(minLength: 0)
         }
+    }
+
+    private func systemTypeTitle(_ rawValue: String) -> String {
+        guard let systemType = GrafanaConstructorSystemType(rawValue: rawValue) else {
+            return rawValue.isEmpty ? "Не указан" : rawValue
+        }
+        return systemType.title
+    }
+
+    private func probeTitles(_ rawValues: [String]) -> String {
+        let titles = rawValues.compactMap { rawValue in
+            GrafanaConstructorProbe(rawValue: rawValue)?.title
+        }
+
+        if titles.isEmpty {
+            return "—"
+        }
+
+        return titles.joined(separator: ", ")
     }
 
     private var recommendedInterval: Int? {

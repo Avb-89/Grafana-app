@@ -734,12 +734,29 @@ struct ContentView: View {
     private func createConstructorDashboard() {
         let dashboardName = constructorDashboardName.trimmingCharacters(in: .whitespacesAndNewlines)
         let configuredHosts = constructorHosts.filter {
-            !$0.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0.probes.isEmpty
+            !$0.target.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            $0.systemType != nil &&
+            !$0.probes.isEmpty
         }
 
         guard !dashboardName.isEmpty, !configuredHosts.isEmpty else {
             lastActionMessage = "Конструктор: укажи название задачи и хотя бы один адрес узла с выбранной проверкой."
             return
+        }
+
+        let taskHosts = configuredHosts.compactMap { host -> GrafanaMonitoringTaskHost? in
+            guard let systemType = host.systemType else {
+                return nil
+            }
+
+            return GrafanaMonitoringTaskHost(
+                id: host.id,
+                name: host.name,
+                target: host.target,
+                systemType: systemType.rawValue,
+                probes: host.probes.map(\.rawValue).sorted(),
+                sshUser: host.sshUser
+            )
         }
 
         do {
@@ -757,6 +774,7 @@ struct ContentView: View {
                 dashboardUID: result.dashboardUID,
                 interval: constructorInterval.rawValue,
                 hostCount: configuredHosts.count,
+                hosts: taskHosts,
                 packagePath: result.directoryURL.path,
                 scriptPath: result.scriptURL.path,
                 desiredState: .stopped,
@@ -910,6 +928,7 @@ struct ContentView: View {
                 dashboardUID: package.dashboardUID,
                 interval: package.interval,
                 hostCount: package.hostCount,
+                hosts: package.hosts,
                 packagePath: package.packageURL.path,
                 scriptPath: package.scriptURL.path,
                 desiredState: package.desiredState,
